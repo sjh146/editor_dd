@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Universal Downloader</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body>
+    <div class="container mt-5">
+      <h1 class="text-center">Universal Video Downloader</h1>
+      <p class="text-center text-muted">Supports YouTube, Instagram, Twitch, TikTok, Reddit, SoundCloud, and more.</p>
+      
+      <div class="card my-4">
+        <div class="card-body">
+          <form action="/download" method="post">
+            <div class="mb-3">
+              <label for="url" class="form-label">Video URL</label>
+              <input type="url" class="form-control" id="url" name="url" placeholder="Enter video URL here" required>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Download</button>
+          </form>
+        </div>
+      </div>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <h2 class="mt-5">Downloaded Files</h2>
+      <div class="list-group">
+        {% for file in files %}
+          <a href="{{ url_for('download_file', filename=file) }}" class="list-group-item list-group-item-action">
+            {{ file }}
+          </a>
+        {% else %}
+          <div class="list-group-item">No files downloaded yet.</div>
+        {% endfor %}
+      </div>
+
+      <h2 class="mt-5">Edit Video</h2>
+      <div class="card my-4">
+        <div class="card-body">
+          <form action="/edit" method="post">
+            <div class="mb-3">
+              <label for="filename" class="form-label">File to Edit</label>
+              <select class="form-select" name="filename" id="filename" required>
+                <option selected disabled value="">Choose a file...</option>
+                {% for file in files %}
+                  <option value="{{ file }}">{{ file }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="row">
+              <div class="col-md-6 mb-3">
+                <label for="start_time" class="form-label">Start Time</label>
+                <input type="text" class="form-control" id="start_time" name="start_time" placeholder="HH:MM:SS" required>
+              </div>
+              <div class="col-md-6 mb-3">
+                <label for="end_time" class="form-label">End Time</label>
+                <input type="text" class="form-control" id="end_time" name="end_time" placeholder="HH:MM:SS" required>
+              </div>
+            </div>
+            <button type="submit" class="btn btn-secondary w-100">Trim Video</button>
+          </form>
+        </div>
+      </div>
+
+      <h2 class="mt-5">MusicGen AI 생성</h2>
+      <div class="card my-4">
+        <div class="card-body">
+          <form action="/musicgen" method="post">
+            <div class="mb-3">
+              <label for="prompt" class="form-label">MusicGen 프롬프트</label>
+              <input type="text" class="form-control" id="prompt" name="prompt" placeholder="예: lofi chill beat" required>
+            </div>
+            <button type="submit" class="btn btn-success w-100">Generate Music</button>
+          </form>
+        </div>
+      </div>
+
+      <h2 class="mt-5">MusicGen 결과 미리보기/다운로드</h2>
+      <div class="row">
+        {% for file in musicgen_files %}
+          {% if file.endswith('.mp3') %}
+            <div class="col-md-4 mb-3">
+              <div class="card">
+                <div class="card-body">
+                  <h5 class="card-title">{{ file }}</h5>
+                  <audio controls src="{{ url_for('download_file', filename=file) }}" style="width:100%"></audio>
+                  <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-primary btn-sm mt-2">Download MP3</a>
+                </div>
+              </div>
+            </div>
+          {% elif file.endswith('_waveform.png') %}
+            <div class="col-md-4 mb-3">
+              <div class="card">
+                <div class="card-body">
+                  <h5 class="card-title">Waveform</h5>
+                  <img src="{{ url_for('download_file', filename=file) }}" alt="Waveform" class="img-fluid">
+                  <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-secondary btn-sm mt-2">Download Waveform</a>
+                </div>
+              </div>
+            </div>
+          {% elif file.endswith('_spectrogram.png') %}
+            <div class="col-md-4 mb-3">
+              <div class="card">
+                <div class="card-body">
+                  <h5 class="card-title">Spectrogram</h5>
+                  <img src="{{ url_for('download_file', filename=file) }}" alt="Spectrogram" class="img-fluid">
+                  <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-secondary btn-sm mt-2">Download Spectrogram</a>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+
+      <h2 class="mt-5">MP3 임베딩 추출 (MusicGen)</h2>
+      <div class="card my-4">
+        <div class="card-body">
+          <form action="/extract_embedding" method="post" enctype="multipart/form-data">
+            <div class="mb-3">
+              <input type="file" class="form-control" name="mp3file" accept=".mp3" required>
+            </div>
+            <button type="submit" class="btn btn-warning w-100">Extract Embedding</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html> 

@@ -1,0 +1,9 @@
+flask==2.3.3
+yt-dlp==2025.6.25
+transformers==4.41.2
+torch
+librosa
+matplotlib
+pydub
+scipy
+torchaudio 
