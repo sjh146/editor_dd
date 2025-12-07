@@ -134,7 +134,212 @@
           </form>
         </div>
       </div>
+
+      <h2 class="mt-5">🤖 AI 설문조사 자동화</h2>
+      <div class="card my-4">
+        <div class="card-body">
+          <p class="text-muted">설문조사 웹페이지를 분석하고 AI가 자동으로 답변을 체크합니다.</p>
+          
+          <div class="mb-3">
+            <label for="survey_url" class="form-label">설문조사 URL</label>
+            <input type="url" class="form-control" id="survey_url" placeholder="https://example.com/survey" required>
+          </div>
+          
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="use_openai">
+                <label class="form-check-label" for="use_openai">
+                  OpenAI API 사용 (더 정확한 답변)
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="headless_mode" checked>
+                <label class="form-check-label" for="headless_mode">
+                  백그라운드 모드 (브라우저 숨김)
+                </label>
+              </div>
+            </div>
+          </div>
+          
+          <div class="mb-3" id="openai_key_group" style="display: none;">
+            <label for="openai_api_key" class="form-label">OpenAI API Key (선택사항)</label>
+            <input type="password" class="form-control" id="openai_api_key" placeholder="sk-...">
+            <small class="form-text text-muted">비워두면 환경변수 OPENAI_API_KEY 사용</small>
+          </div>
+          
+          <div class="mb-3">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="auto_submit">
+              <label class="form-check-label" for="auto_submit">
+                자동 제출 (체크 시 자동으로 설문 제출)
+              </label>
+            </div>
+          </div>
+          
+          <div class="d-grid gap-2">
+            <button type="button" class="btn btn-info" id="analyze_survey_btn">
+              📋 설문조사 분석
+            </button>
+            <button type="button" class="btn btn-success" id="fill_survey_btn" disabled>
+              ✏️ AI로 자동 작성
+            </button>
+          </div>
+          
+          <div id="survey_loading" class="mt-3" style="display: none;">
+            <div class="spinner-border text-primary" role="status">
+              <span class="visually-hidden">처리 중...</span>
+            </div>
+            <span class="ms-2">처리 중입니다. 잠시만 기다려주세요...</span>
+          </div>
+          
+          <div id="survey_results" class="mt-4" style="display: none;">
+            <h5>분석 결과</h5>
+            <div id="survey_questions_list"></div>
+          </div>
+          
+          <div id="survey_fill_results" class="mt-4" style="display: none;">
+            <h5>작성 결과</h5>
+            <div id="fill_results_list"></div>
+          </div>
+        </div>
+      </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      // OpenAI 사용 체크박스 변경 시 API 키 입력 필드 표시/숨김
+      document.getElementById('use_openai').addEventListener('change', function() {
+        document.getElementById('openai_key_group').style.display = this.checked ? 'block' : 'none';
+      });
+
+      // 설문조사 분석
+      document.getElementById('analyze_survey_btn').addEventListener('click', async function() {
+        const url = document.getElementById('survey_url').value;
+        if (!url) {
+          alert('URL을 입력하세요.');
+          return;
+        }
+
+        const loadingDiv = document.getElementById('survey_loading');
+        const resultsDiv = document.getElementById('survey_results');
+        const questionsList = document.getElementById('survey_questions_list');
+        
+        loadingDiv.style.display = 'block';
+        resultsDiv.style.display = 'none';
+        questionsList.innerHTML = '';
+
+        try {
+          const response = await fetch('/survey/analyze', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ url: url })
+          });
+
+          const data = await response.json();
+
+          if (data.error) {
+            alert('오류: ' + data.error);
+          } else {
+            let html = `<div class="alert alert-success">총 ${data.total_questions}개의 질문을 찾았습니다.</div>`;
+            html += '<div class="list-group">';
+            
+            data.questions.forEach((q, idx) => {
+              html += `<div class="list-group-item">`;
+              html += `<h6>질문 ${idx + 1} (${q.type}): ${q.question}</h6>`;
+              html += `<ul class="mb-0">`;
+              q.options.forEach((opt, optIdx) => {
+                html += `<li>${optIdx + 1}. ${opt.label || opt.value}</li>`;
+              });
+              html += `</ul>`;
+              html += `</div>`;
+            });
+            
+            html += '</div>';
+            questionsList.innerHTML = html;
+            resultsDiv.style.display = 'block';
+            document.getElementById('fill_survey_btn').disabled = false;
+          }
+        } catch (error) {
+          alert('오류 발생: ' + error.message);
+        } finally {
+          loadingDiv.style.display = 'none';
+        }
+      });
+
+      // 설문조사 자동 작성
+      document.getElementById('fill_survey_btn').addEventListener('click', async function() {
+        const url = document.getElementById('survey_url').value;
+        if (!url) {
+          alert('URL을 입력하세요.');
+          return;
+        }
+
+        const useOpenAI = document.getElementById('use_openai').checked;
+        const openaiKey = document.getElementById('openai_api_key').value;
+        const headless = document.getElementById('headless_mode').checked;
+        const autoSubmit = document.getElementById('auto_submit').checked;
+
+        const loadingDiv = document.getElementById('survey_loading');
+        const resultsDiv = document.getElementById('survey_fill_results');
+        const fillResultsList = document.getElementById('fill_results_list');
+        
+        loadingDiv.style.display = 'block';
+        resultsDiv.style.display = 'none';
+        fillResultsList.innerHTML = '';
+
+        try {
+          const response = await fetch('/survey/fill', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              url: url,
+              use_openai: useOpenAI,
+              openai_api_key: openaiKey || undefined,
+              headless: headless,
+              auto_submit: autoSubmit
+            })
+          });
+
+          const data = await response.json();
+
+          if (data.error) {
+            alert('오류: ' + data.error);
+          } else {
+            let html = `<div class="alert alert-success">`;
+            html += `성공적으로 ${data.filled_questions}/${data.total_questions}개 질문을 작성했습니다.`;
+            if (data.submitted) {
+              html += ` 설문조사가 제출되었습니다.`;
+            }
+            html += `</div>`;
+            
+            html += '<div class="list-group mt-3">';
+            data.results.forEach((result, idx) => {
+              const statusClass = result.status === 'success' ? 'success' : 'danger';
+              html += `<div class="list-group-item list-group-item-${statusClass}">`;
+              html += `<h6>질문 ${idx + 1}: ${result.question}</h6>`;
+              html += `<p class="mb-0">답변: ${Array.isArray(result.answer) ? result.answer.join(', ') : result.answer}</p>`;
+              if (result.error) {
+                html += `<small class="text-danger">오류: ${result.error}</small>`;
+              }
+              html += `</div>`;
+            });
+            html += '</div>';
+            
+            fillResultsList.innerHTML = html;
+            resultsDiv.style.display = 'block';
+          }
+        } catch (error) {
+          alert('오류 발생: ' + error.message);
+        } finally {
+          loadingDiv.style.display = 'none';
+        }
+      });
+    </script>
   </body>
 </html> 

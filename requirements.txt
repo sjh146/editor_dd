@@ -6,4 +6,10 @@ librosa
 matplotlib
 pydub
 scipy
-torchaudio 
+torchaudio
+selenium
+beautifulsoup4
+requests
+lxml
+openai
+webdriver-manager 
