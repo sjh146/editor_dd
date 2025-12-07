@@ -5,9 +5,11 @@ matplotlib.use('Agg')
 import subprocess
 import yt_dlp
 from flask import (Flask, flash, redirect, render_template, request,
-                   send_from_directory, url_for)
+                   send_from_directory, url_for, jsonify)
 from typing import cast
 from werkzeug.utils import secure_filename
+import json
+import threading
 
 # MusicGen & audio processing imports
 from transformers import MusicgenForConditionalGeneration, MusicgenProcessor
@@ -224,6 +226,109 @@ def extract_embedding():
         flash(f'임베딩 추출 실패: {str(e)}', 'danger')
         print('임베딩 추출 실패:', e)
         return redirect(url_for('index'))
+
+# 설문조사 자동화 관련 임포트
+try:
+    from survey_automation import SurveyAutomation, SurveyAnalyzer
+    SURVEY_AUTOMATION_AVAILABLE = True
+except ImportError as e:
+    print(f"설문조사 자동화 모듈 임포트 실패: {e}")
+    SURVEY_AUTOMATION_AVAILABLE = False
+
+@app.route('/survey/analyze', methods=['POST'])
+def analyze_survey():
+    """설문조사 웹페이지를 분석합니다"""
+    if not SURVEY_AUTOMATION_AVAILABLE:
+        return jsonify({'error': '설문조사 자동화 모듈을 사용할 수 없습니다. 필요한 라이브러리를 설치하세요.'}), 500
+    
+    url = request.json.get('url') if request.is_json else request.form.get('url')
+    if not url:
+        return jsonify({'error': 'URL이 필요합니다.'}), 400
+    
+    try:
+        analyzer = SurveyAnalyzer(url)
+        questions = analyzer.analyze_survey()
+        
+        if not questions:
+            return jsonify({'error': '설문조사를 찾을 수 없습니다. 페이지 구조를 확인하세요.'}), 404
+        
+        # JSON 직렬화 가능한 형태로 변환
+        questions_json = []
+        for q in questions:
+            q_json = {
+                'type': q.get('type'),
+                'name': q.get('name'),
+                'question': q.get('question'),
+                'options': []
+            }
+            for opt in q.get('options', []):
+                q_json['options'].append({
+                    'label': opt.get('label', ''),
+                    'value': opt.get('value', '')
+                })
+            questions_json.append(q_json)
+        
+        return jsonify({
+            'success': True,
+            'url': url,
+            'questions': questions_json,
+            'total_questions': len(questions_json)
+        })
+    except Exception as e:
+        return jsonify({'error': f'분석 중 오류 발생: {str(e)}'}), 500
+
+@app.route('/survey/fill', methods=['POST'])
+def fill_survey():
+    """설문조사를 자동으로 작성합니다"""
+    if not SURVEY_AUTOMATION_AVAILABLE:
+        return jsonify({'error': '설문조사 자동화 모듈을 사용할 수 없습니다.'}), 500
+    
+    data = request.json if request.is_json else request.form.to_dict()
+    url = data.get('url')
+    use_openai = data.get('use_openai', 'false').lower() == 'true'
+    openai_api_key = data.get('openai_api_key', os.environ.get('OPENAI_API_KEY'))
+    auto_submit = data.get('auto_submit', 'false').lower() == 'true'
+    headless = data.get('headless', 'true').lower() == 'true'
+    
+    if not url:
+        return jsonify({'error': 'URL이 필요합니다.'}), 400
+    
+    try:
+        automation = SurveyAutomation(
+            url=url,
+            headless=headless,
+            use_openai=use_openai,
+            openai_api_key=openai_api_key
+        )
+        
+        # 설문조사 분석
+        questions = automation.analyze_survey()
+        if not questions:
+            return jsonify({'error': '설문조사를 찾을 수 없습니다.'}), 404
+        
+        # 자동 작성
+        results = automation.fill_survey(questions)
+        
+        if results is False:
+            return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다.'}), 500
+        
+        # 자동 제출 (요청된 경우)
+        submitted = False
+        if auto_submit:
+            submitted = automation.submit_survey()
+        
+        automation.close()
+        
+        return jsonify({
+            'success': True,
+            'url': url,
+            'total_questions': len(questions),
+            'filled_questions': len([r for r in results if r.get('status') == 'success']),
+            'results': results,
+            'submitted': submitted
+        })
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True) 
