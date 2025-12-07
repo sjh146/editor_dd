@@ -285,50 +285,133 @@ def fill_survey():
     
     data = request.json if request.is_json else request.form.to_dict()
     url = data.get('url')
-    use_openai = data.get('use_openai', 'false').lower() == 'true'
+    
+    # boolean 값을 안전하게 처리하는 헬퍼 함수
+    def to_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() == 'true'
+        return default
+    
+    def to_str(value, default=''):
+        if isinstance(value, str):
+            return value.lower()
+        return str(value).lower() if value else default
+    
+    use_openai = to_bool(data.get('use_openai'), False)
     openai_api_key = data.get('openai_api_key', os.environ.get('OPENAI_API_KEY'))
-    auto_submit = data.get('auto_submit', 'false').lower() == 'true'
-    headless = data.get('headless', 'true').lower() == 'true'
+    auto_submit = to_bool(data.get('auto_submit'), False)
+    headless = to_bool(data.get('headless'), True)
+    paginated = to_bool(data.get('paginated'), False)  # 페이지네이션 모드
+    browser_type = to_str(data.get('browser_type'), 'edge')  # 'edge' or 'chrome', 기본값은 'edge'
     
     if not url:
         return jsonify({'error': 'URL이 필요합니다.'}), 400
     
+    automation = None
     try:
         automation = SurveyAutomation(
             url=url,
             headless=headless,
             use_openai=use_openai,
-            openai_api_key=openai_api_key
+            openai_api_key=openai_api_key,
+            browser_type=browser_type
         )
         
-        # 설문조사 분석
-        questions = automation.analyze_survey()
-        if not questions:
-            return jsonify({'error': '설문조사를 찾을 수 없습니다.'}), 404
-        
-        # 자동 작성
-        results = automation.fill_survey(questions)
-        
-        if results is False:
-            return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다.'}), 500
-        
-        # 자동 제출 (요청된 경우)
-        submitted = False
-        if auto_submit:
-            submitted = automation.submit_survey()
-        
-        automation.close()
-        
-        return jsonify({
-            'success': True,
-            'url': url,
-            'total_questions': len(questions),
-            'filled_questions': len([r for r in results if r.get('status') == 'success']),
-            'results': results,
-            'submitted': submitted
-        })
+        if paginated:
+            # 페이지네이션 모드 (SurveyMonkey 등)
+            results = automation.fill_survey_paginated()
+            
+            if results is False:
+                if automation:
+                    automation.close()
+                return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다. 서버 콘솔을 확인하세요.'}), 500
+            
+            if automation:
+                automation.close()
+            
+            # results가 None일 수 있으므로 체크
+            if results is None:
+                results = []
+            
+            return jsonify({
+                'success': True,
+                'url': url,
+                'mode': 'paginated',
+                'filled_questions': len([r for r in results if isinstance(r, dict) and r.get('status') == 'success']),
+                'total_pages': max([r.get('page', 1) for r in results if isinstance(r, dict)], default=1),
+                'results': results
+            })
+        else:
+            # 기존 모드 (모든 질문을 한 페이지에서 분석)
+            questions = automation.analyze_survey()
+            if not questions:
+                if automation:
+                    automation.close()
+                return jsonify({'error': '설문조사를 찾을 수 없습니다. 페이지네이션 모드를 시도해보세요.'}), 404
+            
+            # 자동 작성
+            results = automation.fill_survey(questions)
+            
+            if results is False:
+                if automation:
+                    automation.close()
+                return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다.'}), 500
+            
+            # 자동 제출 (요청된 경우)
+            submitted = False
+            if auto_submit:
+                submitted = automation.submit_survey()
+            
+            if automation:
+                automation.close()
+            
+            if results is None:
+                results = []
+            
+            return jsonify({
+                'success': True,
+                'url': url,
+                'mode': 'single_page',
+                'total_questions': len(questions) if questions else 0,
+                'filled_questions': len([r for r in results if isinstance(r, dict) and r.get('status') == 'success']),
+                'results': results if isinstance(results, list) else [],
+                'submitted': submitted
+            })
     except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"오류 상세:\n{error_details}")
+        
+        # automation 정리
+        if automation:
+            try:
+                automation.close()
+            except:
+                pass
+        
+        # JSON 응답 반환 보장
+        try:
+            error_msg = str(e)
+            # JSON에 문제가 될 수 있는 문자 이스케이프
+            error_msg = error_msg.replace('"', "'").replace('\n', ' ').replace('\r', ' ')
+            return jsonify({
+                'error': f'오류 발생: {error_msg}',
+                'type': type(e).__name__
+            }), 500
+        except Exception as json_error:
+            # JSON 직렬화 실패 시 최소한의 텍스트 반환
+            from flask import Response
+            try:
+                error_msg = str(e).replace('"', "'")[:200]  # 길이 제한
+            except:
+                error_msg = "알 수 없는 오류"
+            return Response(
+                f'{{"error": "{error_msg}"}}',
+                status=500,
+                mimetype='application/json'
+            )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True) 

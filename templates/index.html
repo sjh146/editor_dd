@@ -164,6 +164,15 @@
             </div>
           </div>
           
+          <div class="mb-3">
+            <label for="browser_type" class="form-label">브라우저 선택</label>
+            <select class="form-select" id="browser_type">
+              <option value="edge" selected>Microsoft Edge (기본값)</option>
+              <option value="chrome">Google Chrome</option>
+            </select>
+            <small class="form-text text-muted">사용할 브라우저를 선택하세요</small>
+          </div>
+          
           <div class="mb-3" id="openai_key_group" style="display: none;">
             <label for="openai_api_key" class="form-label">OpenAI API Key (선택사항)</label>
             <input type="password" class="form-control" id="openai_api_key" placeholder="sk-...">
@@ -179,11 +188,24 @@
             </div>
           </div>
           
+          <div class="mb-3">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="paginated_mode" checked>
+              <label class="form-check-label" for="paginated_mode">
+                페이지네이션 모드 (SurveyMonkey 등 여러 페이지 설문조사에 사용)
+              </label>
+              <small class="form-text text-muted d-block">
+                체크 시: 각 페이지를 순회하면서 실시간으로 질문 파싱 및 답변<br>
+                해제 시: 한 페이지에서 모든 질문을 미리 분석 (간단한 설문조사용)
+              </small>
+            </div>
+          </div>
+          
           <div class="d-grid gap-2">
             <button type="button" class="btn btn-info" id="analyze_survey_btn">
-              📋 설문조사 분석
+              📋 설문조사 분석 (페이지네이션 모드 제외)
             </button>
-            <button type="button" class="btn btn-success" id="fill_survey_btn" disabled>
+            <button type="button" class="btn btn-success" id="fill_survey_btn">
               ✏️ AI로 자동 작성
             </button>
           </div>
@@ -261,7 +283,10 @@
             html += '</div>';
             questionsList.innerHTML = html;
             resultsDiv.style.display = 'block';
-            document.getElementById('fill_survey_btn').disabled = false;
+            // 페이지네이션 모드가 아니면 분석 후 버튼 활성화
+            if (!document.getElementById('paginated_mode').checked) {
+              document.getElementById('fill_survey_btn').disabled = false;
+            }
           }
         } catch (error) {
           alert('오류 발생: ' + error.message);
@@ -282,6 +307,8 @@
         const openaiKey = document.getElementById('openai_api_key').value;
         const headless = document.getElementById('headless_mode').checked;
         const autoSubmit = document.getElementById('auto_submit').checked;
+        const paginated = document.getElementById('paginated_mode').checked;
+        const browserType = document.getElementById('browser_type').value;
 
         const loadingDiv = document.getElementById('survey_loading');
         const resultsDiv = document.getElementById('survey_fill_results');
@@ -302,7 +329,9 @@
               use_openai: useOpenAI,
               openai_api_key: openaiKey || undefined,
               headless: headless,
-              auto_submit: autoSubmit
+              auto_submit: autoSubmit,
+              paginated: paginated,
+              browser_type: browserType
             })
           });
 
@@ -312,9 +341,13 @@
             alert('오류: ' + data.error);
           } else {
             let html = `<div class="alert alert-success">`;
-            html += `성공적으로 ${data.filled_questions}/${data.total_questions}개 질문을 작성했습니다.`;
-            if (data.submitted) {
-              html += ` 설문조사가 제출되었습니다.`;
+            if (data.mode === 'paginated') {
+              html += `성공적으로 ${data.filled_questions}개 질문을 작성했습니다. (총 ${data.total_pages} 페이지)`;
+            } else {
+              html += `성공적으로 ${data.filled_questions}/${data.total_questions}개 질문을 작성했습니다.`;
+              if (data.submitted) {
+                html += ` 설문조사가 제출되었습니다.`;
+              }
             }
             html += `</div>`;
             
@@ -322,6 +355,9 @@
             data.results.forEach((result, idx) => {
               const statusClass = result.status === 'success' ? 'success' : 'danger';
               html += `<div class="list-group-item list-group-item-${statusClass}">`;
+              if (result.page) {
+                html += `<small class="text-muted">페이지 ${result.page} - </small>`;
+              }
               html += `<h6>질문 ${idx + 1}: ${result.question}</h6>`;
               html += `<p class="mb-0">답변: ${Array.isArray(result.answer) ? result.answer.join(', ') : result.answer}</p>`;
               if (result.error) {
