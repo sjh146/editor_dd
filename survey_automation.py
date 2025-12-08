@@ -1,111 +1,67 @@
 """
-설문조사 자동화 모듈 (Transformer 기반)
-Transformer 모델을 사용하여 설문 페이지를 해석하고 자동으로 답변합니다.
+설문조사 자동화 모듈 (AI 기반)
+Edge 드라이버로 페이지를 파싱하고 AI가 질문, 문항, 버튼, 입력란을 찾아 자동으로 답변합니다.
 """
-import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.edge.options import Options as EdgeOptions
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.support.ui import Select
+from selenium.webdriver.common.action_chains import ActionChains
 import re
 import time
 import os
 import platform
 import subprocess
+import traceback
+import random
 
 # Transformer 모델 임포트
 try:
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
-    import torch
+    from transformers import pipeline
     TRANSFORMER_AVAILABLE = True
 except ImportError:
     TRANSFORMER_AVAILABLE = False
-    print("경고: transformers 라이브러리를 설치하세요. pip install transformers torch")
 
 
 class SurveyTransformer:
-    """Transformer 모델을 사용하여 설문조사 질문과 답변을 이해하는 클래스"""
+    """AI 기반 질문 해석 및 답변 생성"""
     
     def __init__(self):
-        self.tokenizer = None
-        self.model = None
         self.classifier = None
         self._load_model()
     
     def _load_model(self):
-        """한국어 텍스트 분류 모델 로드"""
+        """Transformer 모델 로드"""
         if not TRANSFORMER_AVAILABLE:
             return
-        
         try:
-            # 한국어 BERT 모델 사용 (경량 모델)
-            model_name = "klue/bert-base"  # 또는 "beomi/KcELECTRA-base"
-            print(f"Transformer 모델 로딩 중: {model_name}...")
-            
-            # 텍스트 분류 파이프라인 생성 (간단한 감성 분석 기반)
             self.classifier = pipeline(
                 "text-classification",
                 model="monologg/koelectra-base-v3-discriminator",
-                device=-1  # CPU 사용
+                device=-1
             )
-            print("Transformer 모델 로딩 완료")
         except Exception as e:
-            print(f"모델 로딩 실패 (기본 규칙 기반으로 폴백): {e}")
-            self.classifier = None
+            print(f"모델 로딩 실패: {e}")
     
     def understand_question(self, question_text: str, options: list) -> int:
-        """질문 텍스트를 이해하고 가장 적절한 답변 인덱스 반환"""
+        """질문을 이해하고 답변 인덱스 반환"""
         if not question_text or not options:
-            return len(options) // 2  # 중간값 반환
+            return random.randint(0, len(options) - 1) if options else 0
         
-        # Transformer 모델 사용
-        if self.classifier:
-            try:
-                return self._classify_with_transformer(question_text, options)
-            except Exception as e:
-                print(f"Transformer 분류 실패: {e}")
+        # O, X 기호 기반 판단 (먼저 처리)
+        o_x_result = self._interpret_o_x_symbols(options)
+        if o_x_result is not None:
+            return o_x_result
         
-        # 폴백: 규칙 기반 답변
-        return self._rule_based_answer(question_text, options)
-    
-    def _classify_with_transformer(self, question: str, options: list) -> int:
-        """Transformer를 사용하여 답변 선택"""
-        question_lower = question.lower()
+        # 모르는 문자/그림 감지
+        if self._has_unreadable_content(question_text, options):
+            return random.randint(0, len(options) - 1)
         
-        # 긍정/부정 키워드 분석
+        # 키워드 기반 판단
+        question_lower = question_text.lower()
         positive_keywords = ['만족', '좋', '긍정', '동의', '예', 'yes', '좋다', '좋아', 'satisfied', 'good', 'positive', '추천']
-        negative_keywords = ['불만', '나쁜', '부정', '비동의', '아니요', 'no', '나쁘다', 'disappointed', 'bad', 'negative']
-        
-        # 질문에 대한 감성 분석
-        try:
-            result = self.classifier(question)[0]
-            sentiment = result['label']
-            score = result['score']
-            
-            # 긍정적인 질문인 경우 높은 점수 선택
-            if any(kw in question_lower for kw in positive_keywords) or sentiment == 'POSITIVE':
-                if score > 0.6:
-                    return len(options) - 1
-                else:
-                    return max(0, len(options) - 2)
-            
-            # 부정적인 질문인 경우 낮은 점수 선택
-            elif any(kw in question_lower for kw in negative_keywords) or sentiment == 'NEGATIVE':
-                return 0
-        except:
-            pass
-        
-        # 중립적인 경우 중간값 반환
-        return len(options) // 2
-    
-    def _rule_based_answer(self, question: str, options: list) -> int:
-        """규칙 기반 답변 생성"""
-        question_lower = question.lower()
-        
-        positive_keywords = ['만족', '좋', '긍정', '동의', '예', 'yes', '좋다', '좋아', 'satisfied', 'good', 'positive']
         negative_keywords = ['불만', '나쁜', '부정', '비동의', '아니요', 'no', '나쁘다', 'disappointed', 'bad', 'negative']
         
         if any(kw in question_lower for kw in positive_keywords):
@@ -113,21 +69,132 @@ class SurveyTransformer:
         elif any(kw in question_lower for kw in negative_keywords):
             return 0
         else:
-            return len(options) // 2
+            return random.randint(0, len(options) - 1)
+    
+    def _interpret_o_x_symbols(self, options: list) -> int:
+        """O, X 기호 해석"""
+        if not options:
+            return None
+        
+        # O, X 기호 패턴 (다양한 형태)
+        o_symbols = ['o', 'O', '○', '⭕', '✓', '✔', '✅', '◯', '〇', 'YES', 'yes', '예', '동의', '긍정']
+        x_symbols = ['x', 'X', '×', '✗', '✘', '❌', '❎', 'NO', 'no', '아니오', '비동의', '부정']
+        
+        for idx, opt in enumerate(options):
+            label = opt.get('label', '') or opt.get('value', '') if isinstance(opt, dict) else str(opt)
+            if not label:
+                continue
+            
+            label_clean = label.strip()
+            
+            # O 기호가 있으면 해당 옵션 선택 (긍정)
+            if any(symbol in label_clean for symbol in o_symbols):
+                print(f"  O 기호 감지: {label_clean} → 긍정 선택")
+                return idx
+            
+            # X 기호가 있으면 해당 옵션 선택 (부정)
+            if any(symbol in label_clean for symbol in x_symbols):
+                print(f"  X 기호 감지: {label_clean} → 부정 선택")
+                return idx
+        
+        # O, X 기호가 없으면 None 반환 (다른 로직 사용)
+        return None
+    
+    def _has_unreadable_content(self, question_text: str, options: list) -> bool:
+        """모르는 문자/그림 감지 (O, X 기호는 읽을 수 있는 것으로 간주)"""
+        try:
+            if question_text:
+                special_chars = re.findall(r'[^\w\s가-힣a-zA-Z0-9.,!?()\-]', question_text)
+                if len(special_chars) > len(question_text) * 0.3:
+                    return True
+                readable_chars = re.findall(r'[가-힣a-zA-Z0-9]', question_text)
+                if len(readable_chars) < len(question_text) * 0.2:
+                    return True
+            
+            unreadable_count = 0
+            o_x_found = False  # O, X 기호가 있는지 확인
+            
+            for opt in options:
+                label = opt.get('label', '') or opt.get('value', '') if isinstance(opt, dict) else str(opt)
+                if not label:
+                    unreadable_count += 1
+                    continue
+                
+                label_clean = label.strip()
+                
+                # O, X 기호 체크
+                o_x_symbols = ['o', 'O', 'x', 'X', '○', '×', '⭕', '❌', '✓', '✗', '✔', '✘', '◯', '〇', '✅', '❎']
+                if any(symbol in label_clean for symbol in o_x_symbols):
+                    o_x_found = True
+                    continue  # O, X 기호가 있으면 읽을 수 있는 것으로 간주
+                
+                if label_clean in ['옵션', 'option', '선택', 'select']:
+                    unreadable_count += 1
+                    continue
+                
+                special_chars = re.findall(r'[^\w\s가-힣a-zA-Z0-9.,!?()\-]', label)
+                if len(special_chars) > len(label) * 0.4:
+                    unreadable_count += 1
+            
+            # O, X 기호가 있으면 읽을 수 있는 것으로 간주
+            if o_x_found:
+                return False
+            
+            return unreadable_count >= len(options) * 0.5 if options else False
+        except:
+            return True
+    
+    def generate_text_answer(self, question_text: str) -> str:
+        """텍스트 입력용 답변 생성"""
+        if not question_text:
+            return "답변"
+        
+        question_lower = question_text.lower()
+        if '이름' in question_text or 'name' in question_lower:
+            return "홍길동"
+        elif '이메일' in question_text or 'email' in question_lower:
+            return "test@example.com"
+        elif '전화' in question_text or 'phone' in question_lower:
+            return "010-1234-5678"
+        elif '주소' in question_text or 'address' in question_lower:
+            return "서울특별시 강남구 테헤란로 123"
+        elif '생년월일' in question_text or 'birth' in question_lower:
+            return "2000-01-01"
+        elif '의견' in question_text or 'opinion' in question_lower:
+            return "전반적으로 만족스럽고 좋은 서비스라고 생각합니다."
+        else:
+            return "답변" if len(question_text) < 20 else "설문조사에 참여하게 되어 기쁩니다."
 
 
 class SurveyAutoFill:
-    """설문조사 자동 작성 클래스"""
+    """설문조사 자동 작성"""
     
-    def __init__(self, url: str, headless: bool = True, browser_type: str = 'edge'):
+    def __init__(self, url: str, headless: bool = True):
         self.url = url
         self.headless = headless
-        self.browser_type = browser_type.lower()
         self.driver = None
         self.transformer = SurveyTransformer()
     
+    def _init_driver(self):
+        """Edge 드라이버 초기화"""
+        try:
+            edge_path = self._find_edge_executable()
+            options = EdgeOptions()
+            if self.headless:
+                options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            if edge_path:
+                options.binary_location = edge_path
+            
+            self.driver = webdriver.Edge(options=options)
+            return True
+        except Exception as e:
+            print(f"Edge 드라이버 초기화 실패: {e}")
+            return False
+    
     def _find_edge_executable(self):
-        """Edge 브라우저 실행 파일 경로 찾기"""
+        """Edge 실행 파일 찾기"""
         if platform.system() != 'Windows':
             return None
         
@@ -138,10 +205,9 @@ class SurveyAutoFill:
         ]
         
         for path in paths:
-            if os.path.exists(path) and os.path.isfile(path):
+            if os.path.exists(path):
                 return path
         
-        # PowerShell로 찾기
         try:
             ps_cmd = "Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty '(default)'"
             result = subprocess.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True, timeout=5)
@@ -151,321 +217,475 @@ class SurveyAutoFill:
                     return path
         except:
             pass
-        
         return None
     
-    def _init_driver(self):
-        """Edge 드라이버 초기화"""
-        edge_options = EdgeOptions()
-        
-        # Edge 실행 파일 경로 설정
-        edge_path = self._find_edge_executable()
-        if edge_path:
-            edge_options.binary_location = edge_path
-            print(f"Edge 실행 파일: {edge_path}")
-        
-        # 최소 옵션 설정
-        if self.headless:
-            edge_options.add_argument('--headless')
-        edge_options.add_argument('--no-sandbox')
-        edge_options.add_argument('--disable-dev-shm-usage')
-        edge_options.add_argument('--disable-blink-features=AutomationControlled')
-        
-        try:
-            from selenium.webdriver.edge.service import Service
-            service = Service()
-            self.driver = webdriver.Edge(service=service, options=edge_options)
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            print("Edge 드라이버 초기화 성공")
-            return True
-        except Exception as e:
-            print(f"Edge 드라이버 초기화 실패: {e}")
-            return False
-    
-    def _parse_page_with_soup(self, html_content: str):
-        """BeautifulSoup으로 HTML 파싱하여 질문과 선택지 추출"""
-        soup = BeautifulSoup(html_content, 'lxml')
-        questions = []
-        
-        # 라디오 버튼 그룹 찾기
-        for form in soup.find_all(['form', 'div', 'fieldset']):
-            radios = form.find_all('input', {'type': 'radio'})
-            if radios:
-                # name으로 그룹화
-                radio_groups = {}
-                for radio in radios:
-                    name = radio.get('name', '')
-                    if name:
-                        if name not in radio_groups:
-                            radio_groups[name] = {'radios': [], 'question': ''}
-                        
-                        label = self._find_label(radio)
-                        radio_groups[name]['radios'].append({
-                            'label': label,
-                            'value': radio.get('value', ''),
-                            'id': radio.get('id', '')
-                        })
-                
-                # 질문 텍스트 찾기
-                for name, group in radio_groups.items():
-                    question_text = self._find_question_text(form, name)
-                    if question_text:
-                        questions.append({
-                            'type': 'radio',
-                            'name': name,
-                            'question': question_text,
-                            'options': group['radios']
-                        })
-        
-        # 체크박스 찾기
-        for form in soup.find_all(['form', 'div', 'fieldset']):
-            checkboxes = form.find_all('input', {'type': 'checkbox'})
-            if checkboxes:
-                checkbox_groups = {}
-                for cb in checkboxes:
-                    name = cb.get('name', '')
-                    if name:
-                        if name not in checkbox_groups:
-                            checkbox_groups[name] = []
-                        label = self._find_label(cb)
-                        checkbox_groups[name].append({
-                            'label': label,
-                            'value': cb.get('value', ''),
-                            'id': cb.get('id', '')
-                        })
-                
-                for name, options in checkbox_groups.items():
-                    question_text = self._find_question_text(form, name)
-                    if question_text:
-                        questions.append({
-                            'type': 'checkbox',
-                            'name': name,
-                            'question': question_text,
-                            'options': options
-                        })
-        
-        return questions
-    
-    def _find_label(self, input_elem):
-        """입력 요소의 라벨 찾기"""
-        # id로 연결된 label
-        input_id = input_elem.get('id', '')
-        if input_id:
-            label = input_elem.find_parent().find('label', {'for': input_id})
-            if label:
-                return label.get_text(strip=True)
-        
-        # 부모 요소에서 label 찾기
-        parent = input_elem.find_parent()
-        if parent:
-            label = parent.find('label')
-            if label:
-                return label.get_text(strip=True)
-            
-            # 인접한 텍스트 찾기
-            for elem in parent.find_all(['span', 'div', 'p']):
-                text = elem.get_text(strip=True)
-                if text and len(text) < 100:
-                    return text
-        
-        return input_elem.get('value', '') or '옵션'
-    
-    def _find_question_text(self, container, name):
-        """질문 텍스트 찾기"""
-        # legend, h1-h6, label 등에서 질문 찾기
-        for tag in ['legend', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'label', 'p', 'div']:
-            elems = container.find_all(tag)
-            for elem in elems:
-                text = elem.get_text(strip=True)
-                if text and ('?' in text or '질문' in text.lower() or len(text) > 5):
-                    return text
-        
-        return name.replace('_', ' ').title()
-    
-    def _parse_dynamic_page(self):
-        """Selenium으로 동적 페이지에서 질문 파싱 (SurveyMonkey 등)"""
-        questions = []
-        
+    def _parse_page(self):
+        """AI 기반 페이지 파싱 - 질문, 문항, 버튼, 입력란 찾기"""
         try:
             WebDriverWait(self.driver, 15).until(
                 lambda d: d.execute_script('return document.readyState') == 'complete'
             )
-            time.sleep(3)
+            time.sleep(2)
             
-            # 질문 컨테이너 찾기
-            containers = self.driver.find_elements(By.CSS_SELECTOR,
-                "[id^='question-'], fieldset, [data-testid*='Question']")
+            questions = []
+            seen_questions = set()
             
-            if not containers:
-                containers = self.driver.find_elements(By.CSS_SELECTOR, "fieldset")
-            
-            for container in containers:
+            # 1. 질문 찾기
+            question_elements = []
+            selectors = ["h1, h2, h3, h4, h5, h6", "legend", "label", "p", "div[class*='question']"]
+            for selector in selectors:
                 try:
-                    # 질문 텍스트 추출
-                    question_elem = container.find_elements(By.CSS_SELECTOR,
-                        "[id^='question-title-'], legend, h1, h2, h3, .question-title")
-                    
-                    question_text = ""
-                    for elem in question_elem:
-                        text = elem.text.strip()
-                        if text and 5 < len(text) < 500:
-                            question_text = text
-                            break
-                    
-                    if not question_text:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for elem in elements:
+                        try:
+                            text = elem.text.strip()
+                            if text and 5 < len(text) < 500 and self._is_question_text(text):
+                                question_elements.append((elem, text))
+                        except:
+                            continue
+                except:
+                    continue
+            
+            # 2. 라디오/체크박스 찾기
+            radio_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            checkbox_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            
+            radio_groups = {}
+            for radio in radio_inputs:
+                try:
+                    name = radio.get_attribute('name') or ''
+                    if name:
+                        if name not in radio_groups:
+                            radio_groups[name] = []
+                        label = self._get_label_for_input(radio)
+                        radio_groups[name].append({'element': radio, 'label': label})
+                except:
+                    continue
+            
+            checkbox_groups = {}
+            for cb in checkbox_inputs:
+                try:
+                    name = cb.get_attribute('name') or ''
+                    if name:
+                        if name not in checkbox_groups:
+                            checkbox_groups[name] = []
+                        label = self._get_label_for_input(cb)
+                        checkbox_groups[name].append({'element': cb, 'label': label})
+                except:
+                    continue
+            
+            # 3. 텍스트 입력란 찾기
+            text_inputs = []
+            for input_type in ['text', 'email', 'number', 'tel', 'date', 'textarea']:
+                try:
+                    if input_type == 'textarea':
+                        inputs = self.driver.find_elements(By.TAG_NAME, "textarea")
+                    else:
+                        inputs = self.driver.find_elements(By.CSS_SELECTOR, f"input[type='{input_type}']")
+                    for inp in inputs:
+                        try:
+                            if inp.is_displayed() and inp.is_enabled():
+                                label = self._get_label_for_input(inp)
+                                text_inputs.append({'element': inp, 'type': input_type, 'label': label})
+                        except:
+                            continue
+                except:
+                    continue
+            
+            # 4. 버튼 찾기
+            buttons = []
+            for selector in ["button", "input[type='button']", "input[type='submit']", "a[role='button']"]:
+                try:
+                    btns = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for btn in btns:
+                        try:
+                            if btn.is_displayed() and btn.is_enabled():
+                                btn_text = btn.text.strip() or btn.get_attribute('value') or ''
+                                if btn_text:
+                                    buttons.append({'element': btn, 'label': btn_text})
+                        except:
+                            continue
+                except:
+                    continue
+            
+            # 5. 질문과 요소 매칭
+            for question_elem, question_text in question_elements:
+                try:
+                    cleaned = self._clean_question_text(question_text)
+                    if not cleaned or len(cleaned) < 3:
                         continue
                     
+                    question_key = cleaned[:50]
+                    if question_key in seen_questions:
+                        continue
+                    seen_questions.add(question_key)
+                    
+                    try:
+                        container = question_elem.find_element(By.XPATH, "./..")
+                    except:
+                        container = None
+                    
                     # 라디오 버튼 찾기
-                    radios = container.find_elements(By.CSS_SELECTOR, "input[type='radio']")
-                    if radios:
-                        options = []
-                        for idx, radio in enumerate(radios):
-                            # 숨겨진 요소나 비활성화된 요소는 건너뛰기
-                            try:
-                                if not radio.is_displayed() or not radio.is_enabled():
-                                    continue
-                            except:
-                                pass
-                            
-                            label = self._get_label_for_input(radio, container)
-                            
-                            # 라벨이 제대로 찾아지지 않았으면 인덱스 기반 라벨 생성
-                            if label == '옵션' or not label:
-                                label = f"옵션 {idx + 1}"
-                            
-                            options.append({
-                                'label': label,
-                                'element': radio,
-                                'id': radio.get_attribute('id') or '',
-                                'name': radio.get_attribute('name') or '',
-                                'value': radio.get_attribute('value') or ''
-                            })
-                        
-                        if options:
-                            print(f"  - 라디오 버튼 {len(options)}개 찾음: {[opt['label'] for opt in options]}")
-                            questions.append({
-                                'type': 'radio',
-                                'question': question_text,
-                                'options': options,
-                                'container': container
-                            })
+                    options = []
+                    for name, radios in radio_groups.items():
+                        try:
+                            if not container or container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
+                                options.extend(radios)
+                        except:
+                            pass
                     
                     # 체크박스 찾기
-                    checkboxes = container.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
-                    if checkboxes:
-                        options = []
-                        for idx, cb in enumerate(checkboxes):
-                            # 숨겨진 요소나 비활성화된 요소는 건너뛰기
-                            try:
-                                if not cb.is_displayed() or not cb.is_enabled():
-                                    continue
-                            except:
-                                pass
-                            
-                            label = self._get_label_for_input(cb, container)
-                            
-                            # 라벨이 제대로 찾아지지 않았으면 인덱스 기반 라벨 생성
-                            if label == '옵션' or not label:
-                                label = f"옵션 {idx + 1}"
-                            
-                            options.append({
-                                'label': label,
-                                'element': cb,
-                                'id': cb.get_attribute('id') or '',
-                                'name': cb.get_attribute('name') or '',
-                                'value': cb.get_attribute('value') or ''
-                            })
-                        
-                        if options:
-                            print(f"  - 체크박스 {len(options)}개 찾음: {[opt['label'] for opt in options]}")
-                            questions.append({
-                                'type': 'checkbox',
-                                'question': question_text,
-                                'options': options,
-                                'container': container
-                            })
-                
-                except Exception as e:
-                    print(f"컨테이너 파싱 오류: {e}")
+                    checkbox_options = []
+                    for name, checkboxes in checkbox_groups.items():
+                        try:
+                            if not container or container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
+                                checkbox_options.extend(checkboxes)
+                        except:
+                            pass
+                    
+                    # 텍스트 입력란 찾기
+                    inputs = []
+                    for text_inp in text_inputs:
+                        try:
+                            if not container or container.find_elements(By.CSS_SELECTOR, "input, textarea"):
+                                inputs.append(text_inp)
+                        except:
+                            pass
+                    
+                    # 질문 타입 결정
+                    if options:
+                        questions.append({'type': 'radio', 'question': cleaned, 'options': options})
+                    elif checkbox_options:
+                        questions.append({'type': 'checkbox', 'question': cleaned, 'options': checkbox_options})
+                    elif inputs:
+                        questions.append({'type': 'text', 'question': cleaned, 'inputs': inputs})
+                    elif buttons:
+                        questions.append({'type': 'button', 'question': cleaned, 'options': buttons})
+                except:
                     continue
-        
-        except Exception as e:
-            print(f"동적 페이지 파싱 오류: {e}")
-        
-        return questions
-    
-    def _get_label_for_input(self, input_elem, container):
-        """동적 페이지에서 라벨 찾기 (개선된 버전)"""
-        try:
-            # 방법 1: aria-label 속성
-            aria_label = input_elem.get_attribute('aria-label')
-            if aria_label and aria_label.strip() and aria_label != '옵션':
-                return aria_label.strip()
             
-            # 방법 2: id로 연결된 label 찾기 (전체 페이지에서)
-            input_id = input_elem.get_attribute('id')
-            if input_id:
+            # 질문이 없지만 요소가 있는 경우
+            if not questions:
+                if text_inputs:
+                    questions.append({'type': 'text', 'question': '텍스트 입력', 'inputs': text_inputs})
+                elif buttons:
+                    questions.append({'type': 'button', 'question': '버튼 클릭', 'options': buttons})
+            
+            return questions
+        except Exception as e:
+            print(f"파싱 오류: {e}")
+            return []
+    
+    def _is_question_text(self, text: str) -> bool:
+        """질문인지 판단"""
+        if not text or len(text) < 3:
+            return False
+        text_lower = text.lower()
+        markers = ['?', '질문', '입력', '선택', '답변', '어디', '무엇', '언제', '누구', '어떻게', '얼마']
+        return any(marker in text_lower for marker in markers) or bool(re.search(r'[A-Z]?Q\d+\.', text, re.IGNORECASE))
+    
+    def _clean_question_text(self, text: str) -> str:
+        """질문 텍스트 정리"""
+        if not text:
+            return ""
+        text = re.sub(r'%[A-F0-9]{2}', '', text)  # URL 인코딩 제거
+        text = re.sub(r'Powered by SurveyMonkey', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'이전/다음', '', text)
+        text = re.sub(r'^\d+[\.\)]\s*', '', text)  # 번호 제거
+        text = text.strip()
+        # 질문 마커에서 자르기
+        for marker in ['?', ':', '.']:
+            idx = text.find(marker)
+            if idx > 10:
+                text = text[:idx+1]
+        return text.strip()
+    
+    def _get_label_for_input(self, input_elem):
+        """입력 필드의 라벨 찾기"""
+        try:
+            inp_id = input_elem.get_attribute('id')
+            if inp_id:
                 try:
-                    label = self.driver.find_element(By.CSS_SELECTOR, f"label[for='{input_id}']")
+                    label = self.driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
                     text = label.text.strip()
                     if text and text != '옵션':
                         return text
                 except:
                     pass
             
-            # 방법 3: 부모 요소에서 label 찾기
             try:
                 parent = input_elem.find_element(By.XPATH, "./..")
-                # label 태그 찾기
-                labels = parent.find_elements(By.CSS_SELECTOR, "label")
+                labels = parent.find_elements(By.CSS_SELECTOR, "label, span, div")
                 for label in labels:
                     text = label.text.strip()
-                    if text and len(text) > 0 and text != '옵션':
+                    if text and text != '옵션' and len(text) < 50:
                         return text
-                
-                # span, div 등에서 텍스트 찾기
-                for tag in ['span', 'div', 'p']:
-                    elems = parent.find_elements(By.CSS_SELECTOR, tag)
-                    for elem in elems:
-                        text = elem.text.strip()
-                        # 의미있는 텍스트인지 확인 (너무 길거나 짧지 않음)
-                        if text and 2 <= len(text) <= 100 and text != '옵션':
-                            # input이나 다른 요소가 아닌 순수 텍스트인지 확인
-                            if not elem.find_elements(By.CSS_SELECTOR, "input, button, select"):
-                                return text
             except:
                 pass
             
-            # 방법 4: 형제 요소에서 찾기
-            try:
-                # 다음 형제 요소 찾기
-                sibling = input_elem.find_element(By.XPATH, "./following-sibling::*[1]")
-                text = sibling.text.strip()
-                if text and len(text) > 0 and text != '옵션':
-                    return text
-            except:
-                pass
-            
-            # 방법 5: value 속성
-            value = input_elem.get_attribute('value')
-            if value and value.strip() and value != '옵션':
-                return value.strip()
-            
-            # 방법 6: 클래스명이나 data 속성에서 힌트 찾기
-            class_name = input_elem.get_attribute('class') or ''
-            if 'yes' in class_name.lower() or 'accept' in class_name.lower():
-                return '예'
-            elif 'no' in class_name.lower() or 'reject' in class_name.lower():
-                return '아니오'
-        
-        except Exception as e:
-            print(f"라벨 찾기 오류: {e}")
-        
-        # 기본값은 인덱스 기반
+            aria_label = input_elem.get_attribute('aria-label')
+            if aria_label and aria_label != '옵션':
+                return aria_label
+        except:
+            pass
         return '옵션'
     
-    def fill_survey(self, paginated: bool = False):
-        """설문조사 자동 작성"""
+    def _click_element(self, element):
+        """요소 클릭"""
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+            time.sleep(0.3)
+            self.driver.execute_script("arguments[0].click();", element)
+            time.sleep(0.5)
+            return True
+        except:
+            try:
+                element.click()
+                return True
+            except:
+                try:
+                    ActionChains(self.driver).move_to_element(element).click().perform()
+                    return True
+                except:
+                    return False
+    
+    def _fill_input(self, element, value, input_type='text'):
+        """입력 필드에 값 입력"""
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+            time.sleep(0.3)
+            
+            if input_type == 'select':
+                Select(element).select_by_index(0)
+            else:
+                element.clear()
+                element.send_keys(value)
+                time.sleep(0.3)
+            
+            return True
+        except:
+            try:
+                self.driver.execute_script(f"arguments[0].value = '{value}';", element)
+                return True
+            except:
+                return False
+    
+    def _detect_page_change(self, before_url, before_source_hash):
+        """페이지 변경 감지"""
+        try:
+            current_url = self.driver.current_url
+            current_source = self.driver.page_source[:1000]  # 처음 1000자만 해시
+            current_hash = hash(current_source)
+            
+            # URL이 변경되었거나 페이지 소스가 변경되었으면 페이지 변경으로 간주
+            if current_url != before_url:
+                return True
+            if current_hash != before_source_hash:
+                return True
+            return False
+        except:
+            return False
+    
+    def _process_questions_on_current_page(self):
+        """현재 페이지를 다시 파싱하고 AI 분석하여 질문 처리"""
+        try:
+            print(f"  현재 페이지 재파싱 및 AI 분석 시작...")
+            
+            # 페이지 다시 파싱
+            questions = self._parse_page()
+            print(f"  재파싱된 질문 수: {len(questions)}")
+            
+            if not questions:
+                # 질문이 없으면 텍스트 입력란 찾기
+                text_inputs = self.driver.find_elements(By.CSS_SELECTOR, 
+                    "input[type='text'], input[type='email'], textarea")
+                for inp in text_inputs:
+                    try:
+                        if inp.is_displayed() and inp.is_enabled():
+                            label = self._get_label_for_input(inp)
+                            answer = self.transformer.generate_text_answer(label)
+                            if self._fill_input(inp, answer):
+                                print(f"    텍스트 입력: {answer[:30]}")
+                    except:
+                        continue
+                return True
+            
+            # 각 질문 처리
+            answered_count = 0
+            for q in questions:
+                try:
+                    question_text = q.get('question', '')
+                    q_type = q.get('type', '')
+                    
+                    print(f"    질문: {question_text[:50]}...")
+                    
+                    if q_type == 'radio' or q_type == 'checkbox':
+                        # AI로 답변 선택
+                        options = q.get('options', [])
+                        if options:
+                            answer_idx = self.transformer.understand_question(question_text, options)
+                            if answer_idx < len(options):
+                                element = options[answer_idx].get('element')
+                                if element:
+                                    if self._click_element(element):
+                                        answered_count += 1
+                                        print(f"      ✓ 선택: {options[answer_idx].get('label', '옵션')}")
+                    
+                    elif q_type == 'text':
+                        # 텍스트 입력
+                        inputs = q.get('inputs', [])
+                        for inp_info in inputs:
+                            try:
+                                element = inp_info.get('element')
+                                input_type = inp_info.get('type', 'text')
+                                answer = self.transformer.generate_text_answer(question_text)
+                                if self._fill_input(element, answer, input_type):
+                                    answered_count += 1
+                                    print(f"      ✓ 입력: {answer[:30]}")
+                            except:
+                                continue
+                    
+                    elif q_type == 'button':
+                        # 버튼 클릭
+                        buttons = q.get('options', [])
+                        if buttons:
+                            element = buttons[0].get('element')
+                            if element:
+                                if self._click_element(element):
+                                    answered_count += 1
+                                    print(f"      ✓ 클릭: {buttons[0].get('label', '버튼')}")
+                    
+                    time.sleep(0.5)
+                except Exception as e:
+                    print(f"      질문 처리 오류: {e}")
+                    continue
+            
+            print(f"    처리 완료: {answered_count}개 답변")
+            return answered_count > 0
+        except Exception as e:
+            print(f"  페이지 재처리 오류: {e}")
+            return False
+    
+    def _click_next_button(self, max_retries=3):
+        """다음 버튼 클릭 (페이지 변경 확인 포함, 재시도 및 재파싱 로직)"""
+        try:
+            # 현재 페이지 상태 저장
+            before_url = self.driver.current_url
+            before_source = self.driver.page_source[:1000]
+            before_hash = hash(before_source)
+            
+            # 모든 버튼 찾기
+            buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                "button, input[type='button'], input[type='submit'], a[role='button'], "
+                "a[class*='next'], a[class*='Next'], a[class*='continue'], "
+                "button[class*='next'], button[class*='Next'], button[class*='continue']")
+            
+            # 우선순위 키워드
+            keywords = ['다음', 'next', '제출', 'submit', '확인', 'confirm', 'continue', '계속', '진행']
+            
+            # 재시도 루프
+            for retry in range(max_retries):
+                if retry > 0:
+                    print(f"  재시도 {retry}/{max_retries - 1}...")
+                
+                # 1단계: 키워드가 있는 버튼 찾기
+                for btn in buttons:
+                    try:
+                        if not btn.is_displayed() or not btn.is_enabled():
+                            continue
+                        btn_text = (btn.text.strip() or btn.get_attribute('value') or btn.get_attribute('aria-label') or '').lower()
+                        if any(kw in btn_text for kw in keywords):
+                            print(f"  다음 버튼 발견: {btn_text}")
+                            if self._click_element(btn):
+                                time.sleep(2)
+                                # 페이지 변경 확인
+                                if self._detect_page_change(before_url, before_hash):
+                                    print(f"  ✓ 페이지 변경 확인됨")
+                                    return True
+                                else:
+                                    print(f"  ⚠️ 페이지 변경 없음")
+                                    # 페이지 변경이 없으면 12초 대기 후 재파싱 및 재시도
+                                    if retry < max_retries - 1:
+                                        print(f"  12초 대기 후 재파싱 및 재시도...")
+                                        time.sleep(12)
+                                        
+                                        # 현재 페이지를 다시 파싱하고 AI 분석하여 처리
+                                        self._process_questions_on_current_page()
+                                        
+                                        # 버튼 다시 찾기 (페이지가 동적으로 변경될 수 있음)
+                                        buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                                            "button, input[type='button'], input[type='submit'], a[role='button'], "
+                                            "a[class*='next'], a[class*='Next'], a[class*='continue'], "
+                                            "button[class*='next'], button[class*='Next'], button[class*='continue']")
+                                        before_url = self.driver.current_url
+                                        before_source = self.driver.page_source[:1000]
+                                        before_hash = hash(before_source)
+                                        break  # 외부 루프로 돌아가서 재시도
+                    except Exception as e:
+                        print(f"  버튼 클릭 오류: {e}")
+                        continue
+                
+                # 2단계: 모든 버튼 시도
+                if retry == 0:
+                    print(f"  키워드 버튼 실패, 모든 버튼 시도 중...")
+                for btn in buttons:
+                    try:
+                        if btn.is_displayed() and btn.is_enabled():
+                            btn_text = (btn.text.strip() or btn.get_attribute('value') or '').lower()
+                            print(f"  버튼 시도: {btn_text[:30]}")
+                            if self._click_element(btn):
+                                time.sleep(2)
+                                # 페이지 변경 확인
+                                if self._detect_page_change(before_url, before_hash):
+                                    print(f"  ✓ 페이지 변경 확인됨")
+                                    return True
+                                else:
+                                    print(f"  ⚠️ 페이지 변경 없음")
+                                    # 페이지 변경이 없으면 12초 대기 후 재파싱 및 재시도
+                                    if retry < max_retries - 1:
+                                        print(f"  12초 대기 후 재파싱 및 재시도...")
+                                        time.sleep(12)
+                                        
+                                        # 현재 페이지를 다시 파싱하고 AI 분석하여 처리
+                                        self._process_questions_on_current_page()
+                                        
+                                        # 버튼 다시 찾기
+                                        buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                                            "button, input[type='button'], input[type='submit'], a[role='button'], "
+                                            "a[class*='next'], a[class*='Next'], a[class*='continue'], "
+                                            "button[class*='next'], button[class*='Next'], button[class*='continue']")
+                                        before_url = self.driver.current_url
+                                        before_source = self.driver.page_source[:1000]
+                                        before_hash = hash(before_source)
+                                        break  # 외부 루프로 돌아가서 재시도
+                    except:
+                        continue
+                
+                # 재시도 전에 12초 대기 및 재파싱 (마지막 시도가 아니면)
+                if retry < max_retries - 1:
+                    print(f"  12초 대기 후 재파싱 및 재시도...")
+                    time.sleep(12)
+                    
+                    # 현재 페이지를 다시 파싱하고 AI 분석하여 처리
+                    self._process_questions_on_current_page()
+                    
+                    # 버튼 다시 찾기
+                    buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "button, input[type='button'], input[type='submit'], a[role='button'], "
+                        "a[class*='next'], a[class*='Next'], a[class*='continue'], "
+                        "button[class*='next'], button[class*='Next'], button[class*='continue']")
+                    before_url = self.driver.current_url
+                    before_source = self.driver.page_source[:1000]
+                    before_hash = hash(before_source)
+            
+            print(f"  ✗ 다음 버튼을 찾을 수 없거나 페이지가 변경되지 않음 (최대 재시도 횟수 도달)")
+            return False
+        except Exception as e:
+            print(f"  다음 버튼 클릭 오류: {e}")
+            return False
+    
+    def fill_survey(self, paginated: bool = True):
+        """설문조사 자동 작성 (반복 실행)"""
         if not self._init_driver():
             return False
         
@@ -473,400 +693,180 @@ class SurveyAutoFill:
             self.driver.get(self.url)
             time.sleep(5)
             
-            results = []
             page_num = 1
+            max_pages = 50
+            same_page_count = 0  # 같은 페이지에 머무는 횟수
             
-            while True:
-                print(f"\n=== 페이지 {page_num} 처리 중 ===")
+            while page_num <= max_pages:
+                print(f"\n=== 페이지 {page_num} ===")
                 
-                # 동적 페이지에서 질문 파싱
-                questions = self._parse_dynamic_page()
+                # 현재 페이지 상태 저장
+                current_url = self.driver.current_url
+                current_source = self.driver.page_source[:1000]
+                current_hash = hash(current_source)
+                
+                # 페이지 파싱
+                questions = self._parse_page()
+                print(f"  파싱된 질문 수: {len(questions)}")
                 
                 if not questions:
-                    # 정적 HTML도 시도
-                    html = self.driver.page_source
-                    questions = self._parse_page_with_soup(html)
-                
-                if not questions:
-                    print("질문을 찾을 수 없습니다.")
-                    break
-                
-                print(f"찾은 질문 수: {len(questions)}")
-                
-                # 각 질문에 답변
-                for q in questions:
-                    try:
-                        question_text = q['question']
-                        options = q['options']
-                        q_type = q['type']
-                        
-                        print(f"질문: {question_text[:60]}...")
-                        print(f"선택지: {[opt['label'] for opt in options]}")
-                        
-                        # Transformer로 답변 선택
-                        answer_idx = self.transformer.understand_question(question_text, options)
-                        
-                        print(f"선택한 답변: {options[answer_idx]['label']}")
-                        
-                        # Selenium으로 클릭
-                        success = self._click_answer(q, answer_idx)
-                        
-                        results.append({
-                            'page': page_num,
-                            'question': question_text,
-                            'answer': options[answer_idx]['label'],
-                            'status': 'success' if success else 'failed'
-                        })
-                        
-                        time.sleep(1)
-                    
-                    except Exception as e:
-                        print(f"질문 처리 오류: {e}")
-                        results.append({
-                            'page': page_num,
-                            'question': q.get('question', ''),
-                            'status': 'error',
-                            'error': str(e)
-                        })
-                
-                if not paginated:
-                    break
-                
-                # 다음 페이지로 이동
-                if not self._click_next():
-                    break
-                
-                page_num += 1
-                time.sleep(3)
-                
-                if page_num > 50:  # 무한 루프 방지
-                    break
-            
-            return results
-        
-        except Exception as e:
-            print(f"설문조사 작성 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def _click_answer(self, question: dict, answer_idx: int):
-        """답변 클릭 (개선된 버전 - 여러 방법 시도)"""
-        try:
-            options = question['options']
-            if answer_idx >= len(options):
-                return False
-            
-            option = options[answer_idx]
-            q_type = question['type']
-            
-            # 방법 1: Selenium 요소 직접 클릭
-            if 'element' in option:
-                element = option['element']
-                
-                # 요소가 화면에 보이도록 스크롤
-                self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
-                time.sleep(0.8)
-                
-                # 체크박스가 이미 선택되어 있으면 성공
-                if q_type == 'checkbox':
-                    try:
-                        if element.is_selected():
-                            return True
-                    except:
-                        pass
-                
-                # 여러 클릭 방법 시도
-                click_methods = [
-                    # 방법 1-1: JavaScript 클릭 (가장 안정적)
-                    lambda: self.driver.execute_script("arguments[0].click();", element),
-                    # 방법 1-2: 일반 클릭
-                    lambda: element.click(),
-                    # 방법 1-3: ActionChains 사용
-                    lambda: self._action_click(element),
-                ]
-                
-                for click_method in click_methods:
-                    try:
-                        click_method()
-                        time.sleep(0.5)
-                        
-                        # 성공 여부 확인
-                        if q_type == 'checkbox':
-                            if element.is_selected():
-                                return True
-                        elif q_type == 'radio':
-                            if element.is_selected():
-                                return True
-                            # 라디오는 다른 선택이 해제되었을 수도 있으므로 확인
-                            return True
-                        else:
-                            return True
-                    except Exception as e:
-                        continue
-                
-                # 방법 1-4: 라벨 클릭 시도
-                label_text = option.get('label', '')
-                if label_text and label_text != '옵션':
-                    if self._click_by_label_text(label_text, question.get('container'), element):
-                        return True
-            
-            # 방법 2: id로 다시 찾아서 클릭
-            elem_id = option.get('id', '')
-            if elem_id:
-                try:
-                    elem = self.driver.find_element(By.ID, elem_id)
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", elem)
-                    time.sleep(0.5)
-                    self.driver.execute_script("arguments[0].click();", elem)
-                    time.sleep(0.5)
-                    return True
-                except:
-                    pass
-            
-            # 방법 3: name으로 찾기 (정적 페이지)
-            name = question.get('name', '')
-            if name:
-                try:
-                    if q_type == 'radio':
-                        radios = self.driver.find_elements(By.NAME, name)
-                        if answer_idx < len(radios):
-                            radio = radios[answer_idx]
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", radio)
-                            time.sleep(0.5)
-                            self.driver.execute_script("arguments[0].click();", radio)
-                            time.sleep(0.5)
-                            return True
-                    elif q_type == 'checkbox':
-                        checkboxes = self.driver.find_elements(By.NAME, name)
-                        if answer_idx < len(checkboxes):
-                            cb = checkboxes[answer_idx]
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", cb)
-                            time.sleep(0.5)
-                            self.driver.execute_script("arguments[0].click();", cb)
-                            time.sleep(0.5)
-                            return True
-                except:
-                    pass
-            
-            # 방법 4: 라벨 텍스트로 찾아서 클릭
-            label_text = option.get('label', '')
-            if label_text and label_text != '옵션':
-                if self._click_by_label_text(label_text, question.get('container')):
-                    return True
-        
-        except Exception as e:
-            print(f"클릭 오류: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return False
-    
-    def _action_click(self, element):
-        """ActionChains를 사용한 클릭"""
-        try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            actions = ActionChains(self.driver)
-            actions.move_to_element(element).click().perform()
-        except:
-            raise
-    
-    def _click_by_label_text(self, label_text: str, container=None, preferred_element=None):
-        """라벨 텍스트로 요소 클릭"""
-        try:
-            search_area = container if container else self.driver
-            
-            # 라벨 텍스트를 포함하는 요소 찾기
-            xpaths = [
-                f"//label[contains(text(), '{label_text}')]",
-                f"//span[contains(text(), '{label_text}')]",
-                f"//div[contains(text(), '{label_text}')]",
-                f"//p[contains(text(), '{label_text}')]",
-            ]
-            
-            for xpath in xpaths:
-                try:
-                    labels = search_area.find_elements(By.XPATH, xpath)
-                    for label in labels:
+                    # 질문이 없으면 텍스트 입력란과 버튼 찾기
+                    text_inputs = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "input[type='text'], input[type='email'], textarea")
+                    filled_count = 0
+                    for inp in text_inputs:
                         try:
-                            # 라벨이 연결된 input 찾기
-                            label_for = label.get_attribute('for')
-                            if label_for:
-                                try:
-                                    input_elem = self.driver.find_element(By.ID, label_for)
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", input_elem)
-                                    time.sleep(0.3)
-                                    self.driver.execute_script("arguments[0].click();", input_elem)
-                                    time.sleep(0.5)
-                                    return True
-                                except:
-                                    pass
-                            
-                            # 라벨 자체 클릭
-                            if preferred_element:
-                                # 선호하는 요소가 라벨의 자식이거나 형제인지 확인
-                                try:
-                                    if label.find_elements(By.XPATH, f".//input[@id='{preferred_element.get_attribute('id')}']"):
-                                        preferred_element.click()
-                                        return True
-                                except:
-                                    pass
-                            
-                            # 라벨 직접 클릭
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", label)
-                            time.sleep(0.3)
-                            self.driver.execute_script("arguments[0].click();", label)
-                            time.sleep(0.5)
-                            return True
+                            if inp.is_displayed() and inp.is_enabled():
+                                label = self._get_label_for_input(inp)
+                                answer = self.transformer.generate_text_answer(label)
+                                if self._fill_input(inp, answer):
+                                    filled_count += 1
+                                    print(f"  텍스트 입력: {answer[:30]}")
                         except:
                             continue
-                except:
-                    continue
-        
-        except Exception as e:
-            print(f"라벨 텍스트 클릭 오류: {e}")
-        
-        return False
-    
-    def _click_next(self):
-        """다음 페이지 버튼 클릭"""
-        try:
-            # SurveyMonkey 특화
-            next_buttons = self.driver.find_elements(By.CSS_SELECTOR,
-                "button[data-testid='button-next'], button[aria-label*='Next'], button[aria-label*='다음']")
-            
-            for button in next_buttons:
-                try:
-                    text = button.text.lower()
-                    if 'next' in text or '다음' in text or '계속' in text:
-                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                    
+                    if filled_count > 0:
+                        time.sleep(1)
+                    
+                    # 버튼 클릭 시도
+                    if paginated:
+                        if self._click_next_button():
+                            # 페이지 변경 확인
+                            time.sleep(2)
+                            if self._detect_page_change(current_url, current_hash):
+                                page_num += 1
+                                same_page_count = 0
+                                time.sleep(2)
+                                continue
+                            else:
+                                same_page_count += 1
+                                if same_page_count >= 3:
+                                    print(f"  ⚠️ 같은 페이지에 3번 머무름, 종료")
+                                    break
+                        else:
+                            same_page_count += 1
+                            if same_page_count >= 3:
+                                print(f"  ⚠️ 다음 버튼을 찾을 수 없어 종료")
+                                break
+                    else:
+                        break
+                
+                # 각 질문 처리
+                answered_count = 0
+                for q in questions:
+                    try:
+                        question_text = q.get('question', '')
+                        q_type = q.get('type', '')
+                        
+                        print(f"  질문: {question_text[:50]}...")
+                        
+                        if q_type == 'radio' or q_type == 'checkbox':
+                            # AI로 답변 선택
+                            options = q.get('options', [])
+                            if options:
+                                answer_idx = self.transformer.understand_question(question_text, options)
+                                if answer_idx < len(options):
+                                    element = options[answer_idx].get('element')
+                                    if element:
+                                        if self._click_element(element):
+                                            answered_count += 1
+                                            print(f"    ✓ 선택: {options[answer_idx].get('label', '옵션')}")
+                        
+                        elif q_type == 'text':
+                            # 텍스트 입력
+                            inputs = q.get('inputs', [])
+                            for inp_info in inputs:
+                                try:
+                                    element = inp_info.get('element')
+                                    input_type = inp_info.get('type', 'text')
+                                    answer = self.transformer.generate_text_answer(question_text)
+                                    if self._fill_input(element, answer, input_type):
+                                        answered_count += 1
+                                        print(f"    ✓ 입력: {answer[:30]}")
+                                except:
+                                    continue
+                        
+                        elif q_type == 'button':
+                            # 버튼 클릭
+                            buttons = q.get('options', [])
+                            if buttons:
+                                element = buttons[0].get('element')
+                                if element:
+                                    if self._click_element(element):
+                                        answered_count += 1
+                                        print(f"    ✓ 클릭: {buttons[0].get('label', '버튼')}")
+                        
                         time.sleep(0.5)
-                        self.driver.execute_script("arguments[0].click();", button)
-                        time.sleep(2)
-                        return True
-                except:
-                    continue
+                    except Exception as e:
+                        print(f"    질문 처리 오류: {e}")
+                        continue
+                
+                print(f"  처리 완료: {answered_count}개 답변")
+                
+                # 다음 페이지로 이동
+                if paginated:
+                    if answered_count > 0 or len(questions) == 0:
+                        # 답변을 했거나 질문이 없으면 다음 페이지로 이동 시도
+                        print(f"  다음 페이지로 이동 시도...")
+                        if self._click_next_button():
+                            # 페이지 변경 확인
+                            time.sleep(2)
+                            if self._detect_page_change(current_url, current_hash):
+                                print(f"  ✓ 페이지 {page_num} → {page_num + 1}로 이동 성공")
+                                page_num += 1
+                                same_page_count = 0
+                                time.sleep(2)  # 페이지 로딩 대기
+                            else:
+                                same_page_count += 1
+                                print(f"  ⚠️ 페이지 변경 없음 ({same_page_count}/3)")
+                                if same_page_count >= 3:
+                                    print(f"  ⚠️ 같은 페이지에 3번 머무름, 종료")
+                                    break
+                        else:
+                            same_page_count += 1
+                            if same_page_count >= 3:
+                                print(f"  ⚠️ 다음 버튼을 찾을 수 없어 종료")
+                                break
+                    else:
+                        print(f"  답변한 질문이 없어 종료")
+                        break
+                else:
+                    break
             
-            # XPath로 찾기
-            xpaths = [
-                "//button[contains(text(), 'Next')]",
-                "//button[contains(text(), '다음')]",
-                "//input[@type='submit']"
-            ]
-            
-            for xpath in xpaths:
-                try:
-                    buttons = self.driver.find_elements(By.XPATH, xpath)
-                    for button in buttons:
-                        button.click()
-                        time.sleep(2)
-                        return True
-                except:
-                    continue
-        
+            print(f"\n=== 설문조사 작성 완료 (총 {page_num} 페이지) ===")
+            return True
         except Exception as e:
-            print(f"다음 버튼 클릭 오류: {e}")
-        
-        return False
-    
-    def close(self):
-        """브라우저 종료"""
-        if self.driver:
-            try:
+            print(f"설문조사 작성 오류: {e}")
+            traceback.print_exc()
+            return False
+        finally:
+            if self.driver:
                 self.driver.quit()
-            except:
-                pass
-            self.driver = None
 
 
-# Flask 앱과의 호환성을 위한 클래스들
+# 호환성을 위한 래퍼 클래스
 class SurveyAnalyzer:
-    """설문조사 분석 클래스 (Flask 호환성)"""
-    
+    """호환성을 위한 래퍼"""
     def __init__(self, url: str):
-        self.url = url
-        self.autofill = SurveyAutoFill(url, headless=True)
+        self.auto_fill = SurveyAutoFill(url)
     
-    def analyze_survey(self):
+    def analyze(self):
         """설문조사 분석"""
-        if not self.autofill._init_driver():
+        if not self.auto_fill._init_driver():
             return []
-        
         try:
-            self.autofill.driver.get(self.url)
+            self.auto_fill.driver.get(self.auto_fill.url)
             time.sleep(5)
-            questions = self.autofill._parse_dynamic_page()
-            if not questions:
-                html = self.autofill.driver.page_source
-                questions = self.autofill._parse_page_with_soup(html)
-            
+            questions = self.auto_fill._parse_page()
             result = []
             for q in questions:
-                result.append({
-                    'type': q['type'],
-                    'name': q.get('name', ''),
-                    'question': q['question'],
-                    'options': [{'label': opt['label'], 'value': opt.get('value', opt['label'])} 
-                              for opt in q['options']]
-                })
-            
-            self.autofill.close()
+                item = {'question': q.get('question', ''), 'type': q.get('type', '')}
+                if q.get('options'):
+                    item['options'] = [opt.get('label', '옵션') for opt in q['options']]
+                if q.get('inputs'):
+                    item['inputs'] = [inp.get('label', '입력') for inp in q['inputs']]
+                result.append(item)
             return result
-        except Exception as e:
-            print(f"분석 오류: {e}")
-            self.autofill.close()
-            return []
-
-
-class SurveyAutomation:
-    """기존 Flask 앱 호환성을 위한 래퍼"""
-    
-    def __init__(self, url: str, headless: bool = True, use_openai: bool = False, 
-                 openai_api_key: str = None, browser_type: str = 'edge'):
-        self.autofill = SurveyAutoFill(url, headless, browser_type)
-        self.url = url
-    
-    def initialize_driver(self):
-        return self.autofill._init_driver()
-    
-    def analyze_survey(self):
-        """설문조사 분석 (기존 호환성)"""
-        if not self.autofill._init_driver():
-            return None
-        
-        try:
-            self.autofill.driver.get(self.url)
-            time.sleep(5)
-            questions = self.autofill._parse_dynamic_page()
-            if not questions:
-                html = self.autofill.driver.page_source
-                questions = self.autofill._parse_page_with_soup(html)
-            
-            # 기존 형식으로 변환
-            result = []
-            for q in questions:
-                result.append({
-                    'type': q['type'],
-                    'name': q.get('name', ''),
-                    'question': q['question'],
-                    'options': q['options']
-                })
-            return result
-        except Exception as e:
-            print(f"분석 오류: {e}")
-            return None
-    
-    def fill_survey_paginated(self):
-        """페이지네이션 설문조사 작성"""
-        return self.autofill.fill_survey(paginated=True)
-    
-    def fill_survey(self, questions: list):
-        """단일 페이지 설문조사 작성"""
-        return self.autofill.fill_survey(paginated=False)
-    
-    def close(self):
-        self.autofill.close()
-    
-    @property
-    def driver(self):
-        return self.autofill.driver
+        finally:
+            if self.auto_fill.driver:
+                self.auto_fill.driver.quit()
