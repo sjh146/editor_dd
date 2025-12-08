@@ -229,7 +229,7 @@ def extract_embedding():
 
 # 설문조사 자동화 관련 임포트
 try:
-    from survey_automation import SurveyAutomation, SurveyAnalyzer
+    from survey_automation import SurveyAutoFill, SurveyAnalyzer
     SURVEY_AUTOMATION_AVAILABLE = True
 except ImportError as e:
     print(f"설문조사 자동화 모듈 임포트 실패: {e}")
@@ -247,35 +247,20 @@ def analyze_survey():
     
     try:
         analyzer = SurveyAnalyzer(url)
-        questions = analyzer.analyze_survey()
+        questions = analyzer.analyze()
         
         if not questions:
             return jsonify({'error': '설문조사를 찾을 수 없습니다. 페이지 구조를 확인하세요.'}), 404
         
-        # JSON 직렬화 가능한 형태로 변환
-        questions_json = []
-        for q in questions:
-            q_json = {
-                'type': q.get('type'),
-                'name': q.get('name'),
-                'question': q.get('question'),
-                'options': []
-            }
-            for opt in q.get('options', []):
-                q_json['options'].append({
-                    'label': opt.get('label', ''),
-                    'value': opt.get('value', '')
-                })
-            questions_json.append(q_json)
-        
         return jsonify({
             'success': True,
             'url': url,
-            'questions': questions_json,
-            'total_questions': len(questions_json)
+            'questions': questions,
+            'total_questions': len(questions)
         })
     except Exception as e:
-        return jsonify({'error': f'분석 중 오류 발생: {str(e)}'}), 500
+        import traceback
+        return jsonify({'error': f'분석 중 오류 발생: {str(e)}\n{traceback.format_exc()}'}), 500
 
 @app.route('/survey/fill', methods=['POST'])
 def fill_survey():
@@ -311,83 +296,29 @@ def fill_survey():
     
     automation = None
     try:
-        automation = SurveyAutomation(
-            url=url,
-            headless=headless,
-            use_openai=use_openai,
-            openai_api_key=openai_api_key,
-            browser_type=browser_type
-        )
+        automation = SurveyAutoFill(url=url, headless=headless)
         
-        if paginated:
-            # 페이지네이션 모드 (SurveyMonkey 등)
-            results = automation.fill_survey_paginated()
-            
-            if results is False:
-                if automation:
-                    automation.close()
-                return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다. 서버 콘솔을 확인하세요.'}), 500
-            
-            if automation:
-                automation.close()
-            
-            # results가 None일 수 있으므로 체크
-            if results is None:
-                results = []
-            
-            return jsonify({
-                'success': True,
-                'url': url,
-                'mode': 'paginated',
-                'filled_questions': len([r for r in results if isinstance(r, dict) and r.get('status') == 'success']),
-                'total_pages': max([r.get('page', 1) for r in results if isinstance(r, dict)], default=1),
-                'results': results
-            })
-        else:
-            # 기존 모드 (모든 질문을 한 페이지에서 분석)
-            questions = automation.analyze_survey()
-            if not questions:
-                if automation:
-                    automation.close()
-                return jsonify({'error': '설문조사를 찾을 수 없습니다. 페이지네이션 모드를 시도해보세요.'}), 404
-            
-            # 자동 작성
-            results = automation.fill_survey(questions)
-            
-            if results is False:
-                if automation:
-                    automation.close()
-                return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다.'}), 500
-            
-            # 자동 제출 (요청된 경우)
-            submitted = False
-            if auto_submit:
-                submitted = automation.submit_survey()
-            
-            if automation:
-                automation.close()
-            
-            if results is None:
-                results = []
-            
-            return jsonify({
-                'success': True,
-                'url': url,
-                'mode': 'single_page',
-                'total_questions': len(questions) if questions else 0,
-                'filled_questions': len([r for r in results if isinstance(r, dict) and r.get('status') == 'success']),
-                'results': results if isinstance(results, list) else [],
-                'submitted': submitted
-            })
+        success = automation.fill_survey(paginated=paginated)
+        
+        if not success:
+            if automation and automation.driver:
+                automation.driver.quit()
+            return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다. 서버 콘솔을 확인하세요.'}), 500
+        
+        return jsonify({
+            'success': True,
+            'url': url,
+            'mode': 'paginated' if paginated else 'single_page'
+        })
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
         print(f"오류 상세:\n{error_details}")
         
         # automation 정리
-        if automation:
+        if automation and automation.driver:
             try:
-                automation.close()
+                automation.driver.quit()
             except:
                 pass
         
