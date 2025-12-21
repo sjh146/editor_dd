@@ -4,12 +4,9 @@ import matplotlib
 matplotlib.use('Agg')
 import subprocess
 import yt_dlp
-from flask import (Flask, flash, redirect, render_template, request,
-                   send_from_directory, url_for, jsonify)
+from flask import Flask, flash, redirect, render_template, request, send_from_directory, url_for, jsonify
 from typing import cast
 from werkzeug.utils import secure_filename
-import json
-import threading
 
 # MusicGen & audio processing imports
 from transformers import MusicgenForConditionalGeneration, MusicgenProcessor
@@ -19,6 +16,11 @@ import librosa
 import librosa.display
 import matplotlib.pyplot as plt
 import numpy as np
+try:
+    import soundfile as sf
+    SOUNDFILE_AVAILABLE = True
+except ImportError:
+    SOUNDFILE_AVAILABLE = False
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a_super_secret_key'
@@ -27,6 +29,14 @@ app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
 
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
+
+def check_ffmpeg_available():
+    """ffmpeg가 설치되어 있는지 확인"""
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 # MusicGen 모델 로딩 (최초 1회만)
 musicgen_processor = None
@@ -43,9 +53,9 @@ def get_downloaded_files():
     return sorted(os.listdir(app.config['DOWNLOAD_FOLDER']), reverse=True)
 
 def get_musicgen_files():
-    # mp3, waveform, spectrogram만 필터링
+    """MusicGen 관련 파일만 필터링"""
     files = get_downloaded_files()
-    return [f for f in files if f.endswith('.mp3') or f.endswith('.png')]
+    return [f for f in files if f.endswith(('.mp3', '.png'))]
 
 @app.route('/')
 def index():
@@ -60,17 +70,64 @@ def download():
         flash('URL is required!', 'danger')
         return redirect(url_for('index'))
 
-    ydl_opts = {
-        'outtmpl': os.path.join(app.config['DOWNLOAD_FOLDER'], '%(title)s.%(ext)s'),
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        flash('Download successful!', 'success')
-    except Exception as e:
-        flash(f'An error occurred: {str(e)}', 'danger')
+    # ffmpeg 사용 가능 여부 확인
+    ffmpeg_available = check_ffmpeg_available()
+    
+    # 형식 옵션 선택 (더 유연한 선택 우선)
+    if ffmpeg_available:
+        format_options = [
+            'bestvideo+bestaudio/best',  # 가장 유연한 형식 먼저
+            'best',  # 단일 최고 품질
+            'worst',  # 최후의 수단
+        ]
+    else:
+        format_options = [
+            'best',  # 이미 병합된 형식만
+            'best[height<=720]',
+            'best[height<=480]',
+            'worst',
+        ]
+    
+    # 다운로드 시도
+    last_error = None
+    for format_str in format_options:
+        if not ffmpeg_available and '+' in format_str:
+            continue
+        
+        try:
+            ydl_opts = {
+                'outtmpl': os.path.join(app.config['DOWNLOAD_FOLDER'], '%(title)s.%(ext)s'),
+                'format': format_str,
+                'noplaylist': True,
+                'quiet': False,
+                'no_warnings': False,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            flash('Download successful!', 'success')
+            return redirect(url_for('index'))
+        except Exception as e:
+            last_error = str(e)
+            error_str = str(e).lower()
+            # 형식 관련 오류면 다음 형식 시도
+            if any(kw in error_str for kw in ['format is not available', 'requested format', 'format']):
+                continue
+            # ffmpeg/merging 오류면 다음 형식 시도
+            if any(kw in error_str for kw in ['ffmpeg', 'merging']):
+                continue
+            # 네트워크 오류도 재시도
+            if any(kw in error_str for kw in ['network', 'timeout', 'unavailable', 'connection']):
+                continue
+            # 그 외 오류는 중단
+            break
+    
+    # 모든 시도 실패
+    error_msg = last_error or 'Unknown error'
+    if 'format is not available' in error_msg.lower() or 'requested format' in error_msg.lower():
+        error_msg += ' (해당 동영상에 사용 가능한 형식이 없습니다. YouTube 제한일 수 있습니다.)'
+    elif 'ffmpeg' in error_msg.lower() or 'merging' in error_msg.lower():
+        error_msg += ' (ffmpeg가 설치되어 있지 않거나 PATH에 없습니다.)'
+    flash(f'An error occurred: {error_msg}', 'danger')
 
     return redirect(url_for('index'))
 
@@ -84,8 +141,6 @@ def edit():
         flash('All fields are required for editing!', 'danger')
         return redirect(url_for('index'))
     
-    assert filename is not None 
-
     input_path = os.path.join(app.config['DOWNLOAD_FOLDER'], filename)
     
     name, ext = os.path.splitext(filename)
@@ -113,6 +168,51 @@ def edit():
 
     return redirect(url_for('index'))
 
+@app.route('/extract_frame', methods=['POST'])
+def extract_frame():
+    """동영상에서 특정 시간의 프레임을 이미지로 추출"""
+    filename = request.form.get('filename')
+    frame_time = request.form.get('frame_time')
+    
+    if not filename or not frame_time:
+        flash('파일명과 시간을 입력하세요.', 'danger')
+        return redirect(url_for('index'))
+    
+    input_path = os.path.join(app.config['DOWNLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(input_path):
+        flash('파일을 찾을 수 없습니다.', 'danger')
+        return redirect(url_for('index'))
+    
+    # 이미지 파일명 생성
+    name, ext = os.path.splitext(filename)
+    # 시간을 파일명에 사용 가능한 형식으로 변환 (콜론 제거)
+    time_str = frame_time.replace(':', '-')
+    output_filename = f"{name}_frame_{time_str}.jpg"
+    output_path = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
+    
+    # ffmpeg를 사용하여 프레임 추출
+    command = [
+        'ffmpeg',
+        '-y',
+        '-ss', frame_time,
+        '-i', input_path,
+        '-vframes', '1',
+        '-q:v', '2',  # 고품질
+        output_path
+    ]
+    
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        flash(f'프레임 추출 완료: {output_filename}', 'success')
+    except subprocess.CalledProcessError as e:
+        error_message = e.stderr.decode() if e.stderr else str(e)
+        flash(f'프레임 추출 실패: {error_message[:200]}', 'danger')
+    except FileNotFoundError:
+        flash('Error: ffmpeg is not installed or not in your PATH.', 'danger')
+    
+    return redirect(url_for('index'))
+
 @app.route('/downloads/<path:filename>')
 def download_file(filename):
     return send_from_directory(app.config['DOWNLOAD_FOLDER'], filename, as_attachment=True)
@@ -128,11 +228,46 @@ def musicgen():
     inputs = processor(text=[prompt], padding=True, return_tensors="pt")
     with torch.no_grad():
         audio_values = model.generate(**inputs, max_new_tokens=256)
-    # torchaudio로 mp3 저장
+    # 오디오 저장 (MP3 또는 WAV)
     mp3_filename = f"musicgen_{prompt.replace(' ', '_')}.mp3"
     mp3_path = os.path.join(DOWNLOAD_FOLDER, mp3_filename)
-    torchaudio.save(mp3_path, audio_values[0].cpu(), 32000, format="mp3")
-    # Waveform 이미지 생성
+    
+    # torchaudio로 저장 시도, 실패하면 soundfile 사용
+    audio_data = audio_values[0].cpu().numpy()
+    if audio_data.ndim > 1:
+        audio_data = audio_data.squeeze()
+    
+    try:
+        # soundfile로 WAV 저장 후 필요시 MP3로 변환 (더 안정적)
+        wav_path = mp3_path.replace('.mp3', '.wav')
+        if SOUNDFILE_AVAILABLE:
+            sf.write(wav_path, audio_data, 32000)
+            # pydub를 사용하여 WAV를 MP3로 변환
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_wav(wav_path)
+                audio.export(mp3_path, format="mp3")
+                os.remove(wav_path)  # 임시 WAV 파일 삭제
+            except:
+                # MP3 변환 실패 시 WAV 파일명 사용
+                mp3_filename = wav_path
+                mp3_path = wav_path
+        else:
+            # soundfile 없으면 torchaudio로 WAV 저장 시도
+            torchaudio.save(wav_path, audio_values[0].cpu(), 32000, format="wav")
+            mp3_filename = wav_path
+            mp3_path = wav_path
+    except Exception as e:
+        # 모든 저장 방법 실패 시 torchaudio WAV로 fallback
+        try:
+            wav_path = mp3_path.replace('.mp3', '.wav')
+            torchaudio.save(wav_path, audio_values[0].cpu(), 32000, format="wav")
+            mp3_filename = wav_path
+            mp3_path = wav_path
+        except:
+            flash(f'오디오 저장 실패: {str(e)}', 'danger')
+            return redirect(url_for('index'))
+    # Waveform 이미지 생성 (WAV나 MP3 모두 로드 가능)
     y, sr = librosa.load(mp3_path, sr=None)
     plt.figure(figsize=(10, 3))
     librosa.display.waveshow(y, sr=sr)
@@ -194,12 +329,8 @@ def extract_embedding():
                 wav = input_values
                 try:
                     frame_embeddings = model.audio_encoder(wav)  # type: ignore
-                    print('audio_encoder 반환값 타입:', type(frame_embeddings))
-                    print('audio_encoder 반환값:', frame_embeddings)
-                    import sys; sys.stdout.flush()
                 except Exception as e:
                     flash(f'임베딩 추출 실패: audio_encoder 호출 예외: {str(e)}', 'danger')
-                    print('audio_encoder 호출 예외:', e)
                     return redirect(url_for('index'))
                 # audio_codes를 임베딩으로 사용
                 if hasattr(frame_embeddings, 'audio_codes'):
@@ -224,15 +355,13 @@ def extract_embedding():
         return redirect(url_for('index'))
     except Exception as e:
         flash(f'임베딩 추출 실패: {str(e)}', 'danger')
-        print('임베딩 추출 실패:', e)
         return redirect(url_for('index'))
 
 # 설문조사 자동화 관련 임포트
 try:
     from survey_automation import SurveyAutoFill, SurveyAnalyzer
     SURVEY_AUTOMATION_AVAILABLE = True
-except ImportError as e:
-    print(f"설문조사 자동화 모듈 임포트 실패: {e}")
+except ImportError:
     SURVEY_AUTOMATION_AVAILABLE = False
 
 @app.route('/survey/analyze', methods=['POST'])
@@ -271,7 +400,10 @@ def fill_survey():
     data = request.json if request.is_json else request.form.to_dict()
     url = data.get('url')
     
-    # boolean 값을 안전하게 처리하는 헬퍼 함수
+    if not url:
+        return jsonify({'error': 'URL이 필요합니다.'}), 400
+    
+    # boolean 값을 안전하게 처리
     def to_bool(value, default=False):
         if isinstance(value, bool):
             return value
@@ -279,20 +411,8 @@ def fill_survey():
             return value.lower() == 'true'
         return default
     
-    def to_str(value, default=''):
-        if isinstance(value, str):
-            return value.lower()
-        return str(value).lower() if value else default
-    
-    use_openai = to_bool(data.get('use_openai'), False)
-    openai_api_key = data.get('openai_api_key', os.environ.get('OPENAI_API_KEY'))
-    auto_submit = to_bool(data.get('auto_submit'), False)
     headless = to_bool(data.get('headless'), True)
-    paginated = to_bool(data.get('paginated'), False)  # 페이지네이션 모드
-    browser_type = to_str(data.get('browser_type'), 'edge')  # 'edge' or 'chrome', 기본값은 'edge'
-    
-    if not url:
-        return jsonify({'error': 'URL이 필요합니다.'}), 400
+    paginated = to_bool(data.get('paginated'), False)
     
     automation = None
     try:
@@ -311,10 +431,6 @@ def fill_survey():
             'mode': 'paginated' if paginated else 'single_page'
         })
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"오류 상세:\n{error_details}")
-        
         # automation 정리
         if automation and automation.driver:
             try:
@@ -322,27 +438,12 @@ def fill_survey():
             except:
                 pass
         
-        # JSON 응답 반환 보장
-        try:
-            error_msg = str(e)
-            # JSON에 문제가 될 수 있는 문자 이스케이프
-            error_msg = error_msg.replace('"', "'").replace('\n', ' ').replace('\r', ' ')
-            return jsonify({
-                'error': f'오류 발생: {error_msg}',
-                'type': type(e).__name__
-            }), 500
-        except Exception as json_error:
-            # JSON 직렬화 실패 시 최소한의 텍스트 반환
-            from flask import Response
-            try:
-                error_msg = str(e).replace('"', "'")[:200]  # 길이 제한
-            except:
-                error_msg = "알 수 없는 오류"
-            return Response(
-                f'{{"error": "{error_msg}"}}',
-                status=500,
-                mimetype='application/json'
-            )
+        # 에러 메시지 안전하게 처리
+        error_msg = str(e).replace('"', "'").replace('\n', ' ').replace('\r', ' ')[:500]
+        return jsonify({
+            'error': f'오류 발생: {error_msg}',
+            'type': type(e).__name__
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True) 

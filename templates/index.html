@@ -45,16 +45,52 @@
         {% endfor %}
       </div>
 
-      <h2 class="mt-5">Edit Video</h2>
+      <h2 class="mt-5">Video Tools</h2>
+      
+      <!-- 프레임 추출 -->
       <div class="card my-4">
+        <div class="card-header">
+          <h5 class="mb-0">Extract Frame (프레임 추출)</h5>
+        </div>
+        <div class="card-body">
+          <form action="/extract_frame" method="post">
+            <div class="mb-3">
+              <label for="extract_filename" class="form-label">Video File</label>
+              <select class="form-select" name="filename" id="extract_filename" required>
+                <option selected disabled value="">동영상 파일 선택...</option>
+                {% for file in files %}
+                  {% if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')) %}
+                    <option value="{{ file }}">{{ file }}</option>
+                  {% endif %}
+                {% endfor %}
+              </select>
+            </div>
+            <div class="mb-3">
+              <label for="frame_time" class="form-label">Time (시간)</label>
+              <input type="text" class="form-control" id="frame_time" name="frame_time" 
+                     placeholder="HH:MM:SS 또는 SS (예: 00:01:30 또는 90)" required>
+              <small class="form-text text-muted">추출할 프레임의 시간을 입력하세요</small>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Extract Frame</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- 동영상 편집 -->
+      <div class="card my-4">
+        <div class="card-header">
+          <h5 class="mb-0">Trim Video (동영상 자르기)</h5>
+        </div>
         <div class="card-body">
           <form action="/edit" method="post">
             <div class="mb-3">
-              <label for="filename" class="form-label">File to Edit</label>
-              <select class="form-select" name="filename" id="filename" required>
+              <label for="edit_filename" class="form-label">File to Edit</label>
+              <select class="form-select" name="filename" id="edit_filename" required>
                 <option selected disabled value="">Choose a file...</option>
                 {% for file in files %}
-                  <option value="{{ file }}">{{ file }}</option>
+                  {% if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')) %}
+                    <option value="{{ file }}">{{ file }}</option>
+                  {% endif %}
                 {% endfor %}
               </select>
             </div>
