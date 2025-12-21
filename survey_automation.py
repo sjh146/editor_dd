@@ -83,6 +83,34 @@ class SurveyTransformer:
         except Exception as e:
             print(f"{self.api_provider.upper()} API 클라이언트 초기화 실패: {e}")
     
+    def _is_question_with_api(self, text: str) -> bool:
+        """API를 사용하여 질문인지 판단"""
+        if not self.api_client:
+            return None
+        
+        try:
+            prompt = f"""다음 텍스트가 설문조사의 질문인지 판단하세요. 질문이면 'yes', 아니면 'no'로만 답변하세요.
+
+텍스트: {text[:200]}
+
+답변:"""
+
+            response = self.api_client.chat.completions.create(
+                model="gpt-3.5-turbo" if self.api_provider == 'openai' else "deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "당신은 설문조사의 질문을 판단하는 전문가입니다. 질문이면 'yes', 아니면 'no'로만 답변하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=5,
+                temperature=0.1
+            )
+            
+            answer = response.choices[0].message.content.strip().lower()
+            return 'yes' in answer or '예' in answer
+        except Exception as e:
+            print(f"API를 사용한 질문 판단 중 오류 발생: {e}")
+            return None
+    
     def understand_question(self, question_text: str, options: list) -> int:
         """질문을 이해하고 답변 인덱스 반환"""
         if not question_text or not options:
@@ -182,53 +210,110 @@ class SurveyTransformer:
         except:
             return True
     
-    def generate_text_answer(self, question_text: str) -> str:
-        """텍스트 입력용 답변 생성"""
+    def generate_text_answer(self, question_text: str, input_type: str = 'text') -> str:
+        """텍스트 입력용 답변 생성 (입력 타입 고려)"""
         if not question_text:
-            return "답변"
+            question_text = "입력"
+        
+        # 숫자 입력란 처리
+        if input_type == 'number':
+            # API 클라이언트가 있으면 먼저 시도
+            if self.api_client:
+                api_answer = self._generate_text_with_api(question_text, input_type)
+                if api_answer:
+                    # 숫자만 추출
+                    import re
+                    numbers = re.findall(r'\d+', api_answer)
+                    if numbers:
+                        return numbers[0]
+            
+            # 키워드 기반 숫자 답변 생성
+            question_lower = question_text.lower()
+            if any(kw in question_lower for kw in ['나이', 'age', '연령']):
+                return str(random.randint(20, 50))
+            elif any(kw in question_lower for kw in ['인원', '명', '사람', 'people', 'count']):
+                return str(random.randint(1, 10))
+            elif any(kw in question_lower for kw in ['점수', '점', 'score', 'rating']):
+                return str(random.randint(3, 5))
+            elif any(kw in question_lower for kw in ['년', 'year']):
+                return str(random.randint(2000, 2024))
+            else:
+                # 기본적으로 1-100 사이의 숫자
+                return str(random.randint(1, 100))
         
         # API 클라이언트가 있으면 먼저 시도
         if self.api_client:
-            api_answer = self._generate_text_with_api(question_text)
+            api_answer = self._generate_text_with_api(question_text, input_type)
             if api_answer:
                 return api_answer
         
         question_lower = question_text.lower()
         if '이름' in question_text or 'name' in question_lower:
             return "홍길동"
-        elif '이메일' in question_text or 'email' in question_lower:
+        elif '이메일' in question_text or 'email' in question_lower or input_type == 'email':
             return "test@example.com"
-        elif '전화' in question_text or 'phone' in question_lower:
+        elif '전화' in question_text or 'phone' in question_lower or input_type == 'tel':
             return "010-1234-5678"
         elif '주소' in question_text or 'address' in question_lower:
             return "서울특별시 강남구 테헤란로 123"
-        elif '생년월일' in question_text or 'birth' in question_lower:
+        elif '생년월일' in question_text or 'birth' in question_lower or input_type == 'date':
             return "2000-01-01"
         elif '의견' in question_text or 'opinion' in question_lower:
             return "전반적으로 만족스럽고 좋은 서비스라고 생각합니다."
         else:
             return "답변" if len(question_text) < 20 else "설문조사에 참여하게 되어 기쁩니다."
     
-    def _generate_text_with_api(self, question_text: str) -> str:
-        """API를 사용하여 텍스트 답변 생성"""
+    def _generate_text_with_api(self, question_text: str, input_type: str = 'text') -> str:
+        """API를 사용하여 텍스트 답변 생성 (입력 타입 고려)"""
         if not self.api_client:
             return None
         
         try:
-            prompt = f"""다음 설문조사 질문에 적절한 한 문장 답변을 작성하세요. 간결하고 자연스러운 답변을 작성하세요.
+            # 입력 타입에 따른 프롬프트 조정
+            if input_type == 'number':
+                prompt = f"""다음 설문조사 질문에 적절한 숫자만 답변하세요. 숫자만 입력하세요 (예: 25, 100).
+
+질문: {question_text}
+
+답변 (숫자만):"""
+                system_content = "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 적절한 숫자만 답변하세요. 예를 들어, 나이면 20-50 사이의 숫자, 점수면 1-5 사이의 숫자를 답변하세요."
+            elif input_type == 'email':
+                prompt = f"""다음 설문조사 질문에 적절한 이메일 주소만 답변하세요.
+
+질문: {question_text}
+
+답변 (이메일 주소만):"""
+                system_content = "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 적절한 이메일 주소만 답변하세요 (예: test@example.com)."
+            elif input_type == 'tel':
+                prompt = f"""다음 설문조사 질문에 적절한 전화번호만 답변하세요.
+
+질문: {question_text}
+
+답변 (전화번호만):"""
+                system_content = "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 적절한 전화번호만 답변하세요 (예: 010-1234-5678)."
+            elif input_type == 'date':
+                prompt = f"""다음 설문조사 질문에 적절한 날짜만 답변하세요 (YYYY-MM-DD 형식).
+
+질문: {question_text}
+
+답변 (날짜만):"""
+                system_content = "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 적절한 날짜만 YYYY-MM-DD 형식으로 답변하세요."
+            else:
+                prompt = f"""다음 설문조사 질문에 적절한 한 문장 답변을 작성하세요. 간결하고 자연스러운 답변을 작성하세요.
 
 질문: {question_text}
 
 답변:"""
+                system_content = "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 간결하고 자연스러운 답변을 작성하세요."
 
             response = self.api_client.chat.completions.create(
                 model="gpt-3.5-turbo" if self.api_provider == 'openai' else "deepseek-chat",
                 messages=[
-                    {"role": "system", "content": "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 간결하고 자연스러운 답변을 작성하세요."},
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=100,
-                temperature=0.7
+                max_tokens=50 if input_type == 'number' else 100,
+                temperature=0.3 if input_type == 'number' else 0.7
             )
             
             return response.choices[0].message.content.strip()
@@ -400,7 +485,11 @@ class SurveyAutoFill:
                 except:
                     continue
             
-            # 5. 질문과 요소 매칭
+            # 5. 질문과 요소 매칭 (개선된 로직: 이미 사용된 요소 추적)
+            used_elements = set()  # 이미 매칭된 요소 추적
+            used_radio_names = set()  # 이미 사용된 라디오 그룹 이름
+            used_checkbox_names = set()  # 이미 사용된 체크박스 그룹 이름
+            
             for question_elem, question_text in question_elements:
                 try:
                     cleaned = self._clean_question_text(question_text)
@@ -412,56 +501,197 @@ class SurveyAutoFill:
                         continue
                     seen_questions.add(question_key)
                     
+                    # 질문 요소의 위치 정보 가져오기
                     try:
-                        container = question_elem.find_element(By.XPATH, "./..")
+                        question_rect = question_elem.rect
+                        question_y = question_rect['y']
                     except:
-                        container = None
+                        question_y = 0
                     
-                    # 라디오 버튼 찾기
+                    # 질문 요소의 컨테이너 찾기 (더 넓은 범위로)
+                    container = None
+                    try:
+                        # 부모 컨테이너 찾기 (fieldset, div, form 등)
+                        for xpath in ["./ancestor::fieldset[1]", "./ancestor::div[@class*='question'][1]", 
+                                     "./ancestor::div[@class*='form'][1]", "./ancestor::li[1]", "./.."]:
+                            try:
+                                container = question_elem.find_element(By.XPATH, xpath)
+                                if container:
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+                    
+                    # 라디오 버튼 찾기 (질문과 가까운 것만)
                     options = []
                     for name, radios in radio_groups.items():
+                        if name in used_radio_names:
+                            continue
                         try:
-                            if not container or container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
-                                options.extend(radios)
+                            # 컨테이너 내에 있는지 확인
+                            if container:
+                                if container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
+                                    # 질문과 가까운지 확인
+                                    first_radio = radios[0]['element']
+                                    try:
+                                        radio_rect = first_radio.rect
+                                        radio_y = radio_rect['y']
+                                        # 질문 아래 500px 이내에 있는 것만
+                                        if radio_y >= question_y and radio_y <= question_y + 500:
+                                            options.extend(radios)
+                                            used_radio_names.add(name)
+                                            for radio in radios:
+                                                used_elements.add(id(radio['element']))
+                                    except:
+                                        options.extend(radios)
+                                        used_radio_names.add(name)
+                                        for radio in radios:
+                                            used_elements.add(id(radio['element']))
+                            else:
+                                # 컨테이너가 없으면 질문과 가까운 것만
+                                for radio_info in radios:
+                                    radio_elem = radio_info['element']
+                                    if id(radio_elem) in used_elements:
+                                        continue
+                                    try:
+                                        radio_rect = radio_elem.rect
+                                        radio_y = radio_rect['y']
+                                        # 질문 아래 500px 이내에 있는 것만
+                                        if radio_y >= question_y and radio_y <= question_y + 500:
+                                            options.append(radio_info)
+                                            used_elements.add(id(radio_elem))
+                                    except:
+                                        pass
+                                if options:
+                                    used_radio_names.add(name)
                         except:
                             pass
                     
-                    # 체크박스 찾기
+                    # 체크박스 찾기 (질문과 가까운 것만)
                     checkbox_options = []
                     for name, checkboxes in checkbox_groups.items():
+                        if name in used_checkbox_names:
+                            continue
                         try:
-                            if not container or container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
-                                checkbox_options.extend(checkboxes)
+                            if container:
+                                if container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
+                                    first_cb = checkboxes[0]['element']
+                                    try:
+                                        cb_rect = first_cb.rect
+                                        cb_y = cb_rect['y']
+                                        if cb_y >= question_y and cb_y <= question_y + 500:
+                                            checkbox_options.extend(checkboxes)
+                                            used_checkbox_names.add(name)
+                                            for cb in checkboxes:
+                                                used_elements.add(id(cb['element']))
+                                    except:
+                                        checkbox_options.extend(checkboxes)
+                                        used_checkbox_names.add(name)
+                                        for cb in checkboxes:
+                                            used_elements.add(id(cb['element']))
+                            else:
+                                for cb_info in checkboxes:
+                                    cb_elem = cb_info['element']
+                                    if id(cb_elem) in used_elements:
+                                        continue
+                                    try:
+                                        cb_rect = cb_elem.rect
+                                        cb_y = cb_rect['y']
+                                        if cb_y >= question_y and cb_y <= question_y + 500:
+                                            checkbox_options.append(cb_info)
+                                            used_elements.add(id(cb_elem))
+                                    except:
+                                        pass
+                                if checkbox_options:
+                                    used_checkbox_names.add(name)
                         except:
                             pass
                     
-                    # 텍스트 입력란 찾기
+                    # 텍스트 입력란 찾기 (질문과 가까운 것만)
                     inputs = []
                     for text_inp in text_inputs:
+                        inp_elem = text_inp['element']
+                        if id(inp_elem) in used_elements:
+                            continue
                         try:
-                            if not container or container.find_elements(By.CSS_SELECTOR, "input, textarea"):
-                                inputs.append(text_inp)
+                            if container:
+                                if container.find_elements(By.CSS_SELECTOR, "input, textarea"):
+                                    try:
+                                        inp_rect = inp_elem.rect
+                                        inp_y = inp_rect['y']
+                                        if inp_y >= question_y and inp_y <= question_y + 500:
+                                            inputs.append(text_inp)
+                                            used_elements.add(id(inp_elem))
+                                    except:
+                                        inputs.append(text_inp)
+                                        used_elements.add(id(inp_elem))
+                            else:
+                                try:
+                                    inp_rect = inp_elem.rect
+                                    inp_y = inp_rect['y']
+                                    if inp_y >= question_y and inp_y <= question_y + 500:
+                                        inputs.append(text_inp)
+                                        used_elements.add(id(inp_elem))
+                                except:
+                                    pass
                         except:
                             pass
                     
-                    # 질문 타입 결정
+                    # 버튼 찾기 (질문과 가까운 것만, 다음/제출 버튼은 제외)
+                    question_buttons = []
+                    for btn_info in buttons:
+                        btn_elem = btn_info['element']
+                        if id(btn_elem) in used_elements:
+                            continue
+                        btn_text = btn_info.get('label', '').lower()
+                        # 다음/제출 버튼은 제외
+                        if any(kw in btn_text for kw in ['다음', 'next', '제출', 'submit', '확인', 'confirm']):
+                            continue
+                        try:
+                            btn_rect = btn_elem.rect
+                            btn_y = btn_rect['y']
+                            if btn_y >= question_y and btn_y <= question_y + 500:
+                                question_buttons.append(btn_info)
+                                used_elements.add(id(btn_elem))
+                        except:
+                            pass
+                    
+                    # 질문 타입 결정 (우선순위: radio > checkbox > text > button)
                     if options:
                         questions.append({'type': 'radio', 'question': cleaned, 'options': options})
+                        print(f"  ✓ 질문 발견 (라디오): {cleaned[:50]}... ({len(options)}개 옵션)")
                     elif checkbox_options:
                         questions.append({'type': 'checkbox', 'question': cleaned, 'options': checkbox_options})
+                        print(f"  ✓ 질문 발견 (체크박스): {cleaned[:50]}... ({len(checkbox_options)}개 옵션)")
                     elif inputs:
                         questions.append({'type': 'text', 'question': cleaned, 'inputs': inputs})
-                    elif buttons:
-                        questions.append({'type': 'button', 'question': cleaned, 'options': buttons})
-                except:
+                        print(f"  ✓ 질문 발견 (텍스트 입력): {cleaned[:50]}... ({len(inputs)}개 입력란)")
+                    elif question_buttons:
+                        questions.append({'type': 'button', 'question': cleaned, 'options': question_buttons})
+                        print(f"  ✓ 질문 발견 (버튼): {cleaned[:50]}... ({len(question_buttons)}개 버튼)")
+                    else:
+                        print(f"  ⚠ 질문 발견했지만 매칭된 요소 없음: {cleaned[:50]}...")
+                except Exception as e:
+                    print(f"질문 매칭 오류: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
-            # 질문이 없지만 요소가 있는 경우
+            # 질문이 없지만 요소가 있는 경우 (사용되지 않은 요소만)
             if not questions:
-                if text_inputs:
-                    questions.append({'type': 'text', 'question': '텍스트 입력', 'inputs': text_inputs})
-                elif buttons:
-                    questions.append({'type': 'button', 'question': '버튼 클릭', 'options': buttons})
+                unused_text_inputs = [inp for inp in text_inputs if id(inp['element']) not in used_elements]
+                unused_buttons = [btn for btn in buttons if id(btn['element']) not in used_elements]
+                
+                if unused_text_inputs:
+                    questions.append({'type': 'text', 'question': '텍스트 입력', 'inputs': unused_text_inputs})
+                elif unused_buttons:
+                    # 다음/제출 버튼은 제외
+                    filtered_buttons = [btn for btn in unused_buttons 
+                                       if not any(kw in btn.get('label', '').lower() 
+                                                 for kw in ['다음', 'next', '제출', 'submit', '확인', 'confirm'])]
+                    if filtered_buttons:
+                        questions.append({'type': 'button', 'question': '버튼 클릭', 'options': filtered_buttons})
             
             return questions
         except Exception as e:
@@ -469,12 +699,28 @@ class SurveyAutoFill:
             return []
     
     def _is_question_text(self, text: str) -> bool:
-        """질문인지 판단"""
+        """질문인지 판단 (AI 활용 가능)"""
         if not text or len(text) < 3:
             return False
+        
+        # AI 클라이언트가 있으면 AI로 판단
+        if self.transformer.api_client:
+            ai_result = self.transformer._is_question_with_api(text)
+            if ai_result is not None:
+                return ai_result
+        
+        # 규칙 기반 판단 (fallback)
         text_lower = text.lower()
-        markers = ['?', '질문', '입력', '선택', '답변', '어디', '무엇', '언제', '누구', '어떻게', '얼마']
-        return any(marker in text_lower for marker in markers) or bool(re.search(r'[A-Z]?Q\d+\.', text, re.IGNORECASE))
+        markers = ['?', '질문', '입력', '선택', '답변', '어디', '무엇', '언제', '누구', '어떻게', '얼마', '의견', '생각']
+        question_patterns = [
+            r'[A-Z]?Q\d+\.',  # Q1., Q2. 등
+            r'^\d+[\.\)]\s*',  # 1. 2) 등
+            r'.*\?',  # 물음표로 끝나는 경우
+        ]
+        has_question_marker = any(marker in text_lower for marker in markers)
+        has_question_pattern = any(re.search(pattern, text, re.IGNORECASE) for pattern in question_patterns)
+        
+        return has_question_marker or has_question_pattern
     
     def _clean_question_text(self, text: str) -> str:
         """질문 텍스트 정리"""
@@ -542,7 +788,7 @@ class SurveyAutoFill:
                     return False
     
     def _fill_input(self, element, value, input_type='text'):
-        """입력 필드에 값 입력"""
+        """입력 필드에 값 입력 (입력 타입에 맞게 처리)"""
         try:
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
             time.sleep(0.3)
@@ -550,17 +796,34 @@ class SurveyAutoFill:
             if input_type == 'select':
                 Select(element).select_by_index(0)
             else:
+                # 숫자 입력란인 경우 숫자만 추출
+                if input_type == 'number':
+                    import re
+                    numbers = re.findall(r'\d+', str(value))
+                    if numbers:
+                        value = numbers[0]
+                    else:
+                        # 숫자가 없으면 기본값 사용
+                        value = "0"
+                
                 element.clear()
-                element.send_keys(value)
-                time.sleep(0.3)
+                
+                # JavaScript로 먼저 시도 (특히 number 타입의 경우)
+                try:
+                    self.driver.execute_script(f"arguments[0].value = '{value}';", element)
+                    # change 이벤트 발생
+                    self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', {{ bubbles: true }}));", element)
+                    self.driver.execute_script("arguments[0].dispatchEvent(new Event('change', {{ bubbles: true }}));", element)
+                    time.sleep(0.2)
+                except:
+                    # JavaScript 실패 시 일반 입력 시도
+                    element.send_keys(value)
+                    time.sleep(0.3)
             
             return True
-        except:
-            try:
-                self.driver.execute_script(f"arguments[0].value = '{value}';", element)
-                return True
-            except:
-                return False
+        except Exception as e:
+            print(f"입력 필드 채우기 실패: {e}")
+            return False
     
     def _detect_page_change(self, before_url, before_source_hash):
         """페이지 변경 감지"""
@@ -590,14 +853,17 @@ class SurveyAutoFill:
             if not questions:
                 # 질문이 없으면 텍스트 입력란 찾기
                 text_inputs = self.driver.find_elements(By.CSS_SELECTOR, 
-                    "input[type='text'], input[type='email'], textarea")
+                    "input[type='text'], input[type='email'], input[type='number'], input[type='tel'], textarea")
                 for inp in text_inputs:
                     try:
                         if inp.is_displayed() and inp.is_enabled():
                             label = self._get_label_for_input(inp)
-                            answer = self.transformer.generate_text_answer(label)
-                            if self._fill_input(inp, answer):
-                                print(f"    텍스트 입력: {answer[:30]}")
+                            input_type = inp.get_attribute('type') or 'text'
+                            if inp.tag_name == 'textarea':
+                                input_type = 'textarea'
+                            answer = self.transformer.generate_text_answer(label, input_type)
+                            if self._fill_input(inp, answer, input_type):
+                                print(f"    텍스트 입력 ({input_type}): {answer[:30]}")
                     except:
                         continue
                 return True
@@ -630,11 +896,15 @@ class SurveyAutoFill:
                             try:
                                 element = inp_info.get('element')
                                 input_type = inp_info.get('type', 'text')
-                                answer = self.transformer.generate_text_answer(question_text)
+                                label = inp_info.get('label', question_text)
+                                # 질문 텍스트와 라벨을 조합하여 더 정확한 답변 생성
+                                combined_text = f"{question_text} {label}".strip()
+                                answer = self.transformer.generate_text_answer(combined_text, input_type)
                                 if self._fill_input(element, answer, input_type):
                                     answered_count += 1
-                                    print(f"      ✓ 입력: {answer[:30]}")
-                            except:
+                                    print(f"      ✓ 입력 ({input_type}): {answer[:30]}")
+                            except Exception as e:
+                                print(f"      입력 실패: {e}")
                                 continue
                     
                     elif q_type == 'button':
@@ -804,16 +1074,19 @@ class SurveyAutoFill:
                 if not questions:
                     # 질문이 없으면 텍스트 입력란과 버튼 찾기
                     text_inputs = self.driver.find_elements(By.CSS_SELECTOR, 
-                        "input[type='text'], input[type='email'], textarea")
+                        "input[type='text'], input[type='email'], input[type='number'], input[type='tel'], textarea")
                     filled_count = 0
                     for inp in text_inputs:
                         try:
                             if inp.is_displayed() and inp.is_enabled():
                                 label = self._get_label_for_input(inp)
-                                answer = self.transformer.generate_text_answer(label)
-                                if self._fill_input(inp, answer):
+                                input_type = inp.get_attribute('type') or 'text'
+                                if inp.tag_name == 'textarea':
+                                    input_type = 'textarea'
+                                answer = self.transformer.generate_text_answer(label, input_type)
+                                if self._fill_input(inp, answer, input_type):
                                     filled_count += 1
-                                    print(f"  텍스트 입력: {answer[:30]}")
+                                    print(f"  텍스트 입력 ({input_type}): {answer[:30]}")
                         except:
                             continue
                     
@@ -871,10 +1144,13 @@ class SurveyAutoFill:
                                 try:
                                     element = inp_info.get('element')
                                     input_type = inp_info.get('type', 'text')
-                                    answer = self.transformer.generate_text_answer(question_text)
+                                    label = inp_info.get('label', question_text)
+                                    # 질문 텍스트와 라벨을 조합하여 더 정확한 답변 생성
+                                    combined_text = f"{question_text} {label}".strip()
+                                    answer = self.transformer.generate_text_answer(combined_text, input_type)
                                     if self._fill_input(element, answer, input_type):
                                         answered_count += 1
-                                        print(f"    ✓ 입력: {answer[:30]}")
+                                        print(f"    ✓ 입력 ({input_type}): {answer[:30]}")
                                 except:
                                     continue
                         
