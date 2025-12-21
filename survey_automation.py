@@ -1,6 +1,7 @@
 """
 설문조사 자동화 모듈 (AI 기반)
 Edge 드라이버로 페이지를 파싱하고 AI가 질문, 문항, 버튼, 입력란을 찾아 자동으로 답변합니다.
+OpenAI 및 DeepSeek API 지원
 """
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -25,13 +26,23 @@ try:
 except ImportError:
     TRANSFORMER_AVAILABLE = False
 
+# OpenAI API 임포트
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
 
 class SurveyTransformer:
     """AI 기반 질문 해석 및 답변 생성"""
     
-    def __init__(self):
+    def __init__(self, api_provider: str = None, api_key: str = None):
         self.classifier = None
+        self.api_client = None
+        self.api_provider = api_provider  # 'openai' or 'deepseek'
         self._load_model()
+        self._init_api_client(api_key)
     
     def _load_model(self):
         """Transformer 모델 로드"""
@@ -45,6 +56,32 @@ class SurveyTransformer:
             )
         except Exception as e:
             print(f"모델 로딩 실패: {e}")
+    
+    def _init_api_client(self, api_key: str = None):
+        """OpenAI/DeepSeek API 클라이언트 초기화"""
+        if not self.api_provider or not OPENAI_AVAILABLE:
+            return
+        
+        # API 키 가져오기
+        if not api_key:
+            if self.api_provider == 'openai':
+                api_key = os.getenv('OPENAI_API_KEY')
+            elif self.api_provider == 'deepseek':
+                api_key = os.getenv('DEEPSEEK_API_KEY')
+        
+        if not api_key:
+            print(f"{self.api_provider.upper()} API 키를 찾을 수 없습니다.")
+            return
+        
+        try:
+            # DeepSeek은 base_url을 변경해야 함
+            if self.api_provider == 'deepseek':
+                self.api_client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+            else:
+                self.api_client = OpenAI(api_key=api_key)
+            print(f"{self.api_provider.upper()} API 클라이언트 초기화 완료")
+        except Exception as e:
+            print(f"{self.api_provider.upper()} API 클라이언트 초기화 실패: {e}")
     
     def understand_question(self, question_text: str, options: list) -> int:
         """질문을 이해하고 답변 인덱스 반환"""
@@ -150,6 +187,12 @@ class SurveyTransformer:
         if not question_text:
             return "답변"
         
+        # API 클라이언트가 있으면 먼저 시도
+        if self.api_client:
+            api_answer = self._generate_text_with_api(question_text)
+            if api_answer:
+                return api_answer
+        
         question_lower = question_text.lower()
         if '이름' in question_text or 'name' in question_lower:
             return "홍길동"
@@ -165,16 +208,43 @@ class SurveyTransformer:
             return "전반적으로 만족스럽고 좋은 서비스라고 생각합니다."
         else:
             return "답변" if len(question_text) < 20 else "설문조사에 참여하게 되어 기쁩니다."
+    
+    def _generate_text_with_api(self, question_text: str) -> str:
+        """API를 사용하여 텍스트 답변 생성"""
+        if not self.api_client:
+            return None
+        
+        try:
+            prompt = f"""다음 설문조사 질문에 적절한 한 문장 답변을 작성하세요. 간결하고 자연스러운 답변을 작성하세요.
+
+질문: {question_text}
+
+답변:"""
+
+            response = self.api_client.chat.completions.create(
+                model="gpt-3.5-turbo" if self.api_provider == 'openai' else "deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "당신은 설문조사에 답변하는 사용자입니다. 질문에 맞는 간결하고 자연스러운 답변을 작성하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=100,
+                temperature=0.7
+            )
+            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"API를 사용한 텍스트 생성 중 오류 발생: {e}")
+            return None
 
 
 class SurveyAutoFill:
     """설문조사 자동 작성"""
     
-    def __init__(self, url: str, headless: bool = True):
+    def __init__(self, url: str, headless: bool = True, api_provider: str = None, api_key: str = None):
         self.url = url
         self.headless = headless
         self.driver = None
-        self.transformer = SurveyTransformer()
+        self.transformer = SurveyTransformer(api_provider=api_provider, api_key=api_key)
     
     def _init_driver(self):
         """Edge 드라이버 초기화"""
