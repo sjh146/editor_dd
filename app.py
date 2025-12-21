@@ -203,7 +203,7 @@ def extract_frame():
     ]
     
     try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(command, check=True, capture_output=True, text=True)
         flash(f'프레임 추출 완료: {output_filename}', 'success')
     except subprocess.CalledProcessError as e:
         error_message = e.stderr.decode() if e.stderr else str(e)
@@ -449,10 +449,13 @@ def fill_survey():
     
     headless = to_bool(data.get('headless'), True)
     paginated = to_bool(data.get('paginated'), False)
+    use_api = to_bool(data.get('use_api'), False)
+    api_provider = data.get('api_provider') if use_api else None
+    api_key = data.get('api_key') if use_api else None
     
     automation = None
     try:
-        automation = SurveyAutoFill(url=url, headless=headless)
+        automation = SurveyAutoFill(url=url, headless=headless, api_provider=api_provider, api_key=api_key)
         
         success = automation.fill_survey(paginated=paginated)
         
