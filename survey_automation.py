@@ -9,6 +9,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import NoSuchWindowException, InvalidSessionIdException, WebDriverException
 import re
 import time
 import os
@@ -184,13 +185,34 @@ class SurveyAutoFill:
                 options.add_argument('--headless')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_experimental_option('excludeSwitches', ['enable-logging'])
+            options.add_experimental_option('useAutomationExtension', False)
             if edge_path:
                 options.binary_location = edge_path
             
             self.driver = webdriver.Edge(options=options)
+            # 브라우저 창 최대화 시도
+            try:
+                self.driver.maximize_window()
+            except:
+                pass
             return True
         except Exception as e:
             print(f"Edge 드라이버 초기화 실패: {e}")
+            return False
+    
+    def _is_driver_valid(self):
+        """드라이버 세션 유효성 확인"""
+        try:
+            if not self.driver:
+                return False
+            # 간단한 명령으로 세션 확인
+            _ = self.driver.current_url
+            return True
+        except (NoSuchWindowException, InvalidSessionIdException, WebDriverException):
+            return False
+        except:
             return False
     
     def _find_edge_executable(self):
