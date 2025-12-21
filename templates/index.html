@@ -5,11 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Universal Downloader</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='index.css') }}">
   </head>
   <body>
     <div class="container mt-5">
-      <h1 class="text-center">Universal Video Downloader</h1>
-      <p class="text-center text-muted">Supports YouTube, Instagram, Twitch, TikTok, Reddit, SoundCloud, and more.</p>
+      <h1 class="text-center">UNIVERSAL DOWNLOADER</h1>
+      <p class="subtitle">Supports YouTube, Instagram, Twitch, TikTok, Reddit, SoundCloud, and more.</p>
       
       <div class="card my-4">
         <div class="card-body">
@@ -38,10 +39,11 @@
       <div class="list-group">
         {% for file in files %}
           <a href="{{ url_for('download_file', filename=file) }}" class="list-group-item list-group-item-action">
-            {{ file }}
+            <strong>{{ file }}</strong>
+            <span class="badge bg-secondary ms-2" style="float: right;">Download</span>
           </a>
         {% else %}
-          <div class="list-group-item">No files downloaded yet.</div>
+          <div class="list-group-item text-muted">No files downloaded yet.</div>
         {% endfor %}
       </div>
 
@@ -117,6 +119,17 @@
               <label for="prompt" class="form-label">MusicGen 프롬프트</label>
               <input type="text" class="form-control" id="prompt" name="prompt" placeholder="예: lofi chill beat" required>
             </div>
+            <div class="mb-3">
+              <label for="duration" class="form-label">음악 길이 (초)</label>
+              <select class="form-select" id="duration" name="duration">
+                <option value="15">15초 (짧음)</option>
+                <option value="30" selected>30초 (기본)</option>
+                <option value="60">1분</option>
+                <option value="120">2분 (권장)</option>
+                <option value="180">3분 (긴 음악)</option>
+              </select>
+              <small class="form-text text-muted">더 긴 음악일수록 생성 시간이 오래 걸릴 수 있습니다.</small>
+            </div>
             <button type="submit" class="btn btn-success w-100">Generate Music</button>
           </form>
         </div>
@@ -172,9 +185,9 @@
       </div>
 
       <h2 class="mt-5">🤖 AI 설문조사 자동화</h2>
-      <div class="card my-4">
+      <div class="card my-4 modern-panel">
         <div class="card-body">
-          <p class="text-muted">설문조사 웹페이지를 분석하고 AI가 자동으로 답변을 체크합니다.</p>
+          <p class="text-muted" style="color: var(--text-secondary) !important;">설문조사 웹페이지를 분석하고 AI가 자동으로 답변을 체크합니다.</p>
           
           <div class="mb-3">
             <label for="survey_url" class="form-label">설문조사 URL</label>

@@ -220,14 +220,37 @@ def download_file(filename):
 @app.route('/musicgen', methods=['POST'])
 def musicgen():
     prompt = request.form.get('prompt')
+    duration = request.form.get('duration', '30')  # 기본값 30초
+    
     if not prompt:
         flash('프롬프트를 입력하세요.', 'danger')
         return redirect(url_for('index'))
+    
+    # duration을 초 단위로 변환하고 토큰 수 계산
+    try:
+        duration_seconds = int(duration)
+    except ValueError:
+        duration_seconds = 30
+    
+    # MusicGen은 대략 5-10초당 256 토큰 정도 생성 가능
+    # 2분(120초)을 위해 약 1500-2000 토큰이 필요
+    # 더 긴 음악을 위해 최대값 설정
+    if duration_seconds <= 15:
+        max_new_tokens = 256
+    elif duration_seconds <= 30:
+        max_new_tokens = 512
+    elif duration_seconds <= 60:
+        max_new_tokens = 1024
+    elif duration_seconds <= 120:
+        max_new_tokens = 2048
+    else:
+        max_new_tokens = 3072  # 최대 약 3-4분
+    
     processor, model = load_musicgen()
     # MusicGen inference
     inputs = processor(text=[prompt], padding=True, return_tensors="pt")
     with torch.no_grad():
-        audio_values = model.generate(**inputs, max_new_tokens=256)
+        audio_values = model.generate(**inputs, max_new_tokens=max_new_tokens)
     # 오디오 저장 (MP3 또는 WAV)
     mp3_filename = f"musicgen_{prompt.replace(' ', '_')}.mp3"
     mp3_path = os.path.join(DOWNLOAD_FOLDER, mp3_filename)
@@ -236,6 +259,17 @@ def musicgen():
     audio_data = audio_values[0].cpu().numpy()
     if audio_data.ndim > 1:
         audio_data = audio_data.squeeze()
+    
+    # 오디오 정규화: 클리핑 방지를 위해 진폭을 -1.0~1.0 범위로 제한
+    # 약간의 헤드룸(-0.95~0.95)을 남겨서 안전하게 저장
+    max_amplitude = np.max(np.abs(audio_data))
+    if max_amplitude > 0:
+        # 최대 진폭이 0.95를 넘지 않도록 스케일링
+        target_max = 0.95
+        if max_amplitude > target_max:
+            audio_data = audio_data * (target_max / max_amplitude)
+    # 추가 안전장치: -1.0~1.0 범위를 벗어나는 값은 클리핑
+    audio_data = np.clip(audio_data, -0.95, 0.95)
     
     try:
         # soundfile로 WAV 저장 후 필요시 MP3로 변환 (더 안정적)
@@ -253,15 +287,17 @@ def musicgen():
                 mp3_filename = wav_path
                 mp3_path = wav_path
         else:
-            # soundfile 없으면 torchaudio로 WAV 저장 시도
-            torchaudio.save(wav_path, audio_values[0].cpu(), 32000, format="wav")
+            # soundfile 없으면 torchaudio로 WAV 저장 시도 (정규화된 데이터 사용)
+            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
+            torchaudio.save(wav_path, audio_tensor, 32000, format="wav")
             mp3_filename = wav_path
             mp3_path = wav_path
     except Exception as e:
-        # 모든 저장 방법 실패 시 torchaudio WAV로 fallback
+        # 모든 저장 방법 실패 시 torchaudio WAV로 fallback (정규화된 데이터 사용)
         try:
             wav_path = mp3_path.replace('.mp3', '.wav')
-            torchaudio.save(wav_path, audio_values[0].cpu(), 32000, format="wav")
+            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
+            torchaudio.save(wav_path, audio_tensor, 32000, format="wav")
             mp3_filename = wav_path
             mp3_path = wav_path
         except:
