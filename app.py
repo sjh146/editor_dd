@@ -7,9 +7,11 @@ import yt_dlp
 from flask import Flask, flash, redirect, render_template, request, send_from_directory, url_for, jsonify
 from typing import cast
 from werkzeug.utils import secure_filename
+import json
+import re
+from datetime import datetime
 
-# MusicGen & audio processing imports
-from transformers import MusicgenForConditionalGeneration, MusicgenProcessor
+# Audio processing imports
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import torchaudio
@@ -27,9 +29,46 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a_super_secret_key'
 DOWNLOAD_FOLDER = 'downloads'
 app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
+KNOWLEDGE_BASE_FILE = 'chatbot_knowledge.json'
+LEARNING_DATA_FILE = 'chatbot_learning_data.json'
 
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
+
+# 학습 데이터 및 지식 베이스 로딩
+def load_knowledge_base():
+    """지식 베이스 로딩"""
+    if os.path.exists(KNOWLEDGE_BASE_FILE):
+        try:
+            with open(KNOWLEDGE_BASE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {'qa_pairs': [], 'examples': []}
+    return {'qa_pairs': [], 'examples': []}
+
+def save_knowledge_base(kb_data):
+    """지식 베이스 저장"""
+    with open(KNOWLEDGE_BASE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(kb_data, f, ensure_ascii=False, indent=2)
+
+def load_learning_data():
+    """학습 데이터 로딩"""
+    if os.path.exists(LEARNING_DATA_FILE):
+        try:
+            with open(LEARNING_DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {'conversations': [], 'feedback': []}
+    return {'conversations': [], 'feedback': []}
+
+def save_learning_data(learning_data):
+    """학습 데이터 저장"""
+    with open(LEARNING_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(learning_data, f, ensure_ascii=False, indent=2)
+
+# 전역 변수로 지식 베이스와 학습 데이터 로드
+knowledge_base = load_knowledge_base()
+learning_data = load_learning_data()
 
 def check_ffmpeg_available():
     """ffmpeg가 설치되어 있는지 확인"""
@@ -39,109 +78,165 @@ def check_ffmpeg_available():
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
-# MusicGen 모델 로딩 (최초 1회만)
-musicgen_processor = None
-musicgen_model = None
-
-def load_musicgen() -> tuple[MusicgenProcessor, MusicgenForConditionalGeneration]:
-    global musicgen_processor, musicgen_model
-    if musicgen_processor is None or musicgen_model is None:
-        musicgen_processor = cast(MusicgenProcessor, MusicgenProcessor.from_pretrained("facebook/musicgen-small"))
-        musicgen_model = cast(MusicgenForConditionalGeneration, MusicgenForConditionalGeneration.from_pretrained("facebook/musicgen-small"))
-    return musicgen_processor, musicgen_model
-
 # 챗봇 모델 로딩 (최초 1회만)
 chatbot_tokenizer = None
 chatbot_model = None
+
+# TTS 모델 로딩 (최초 1회만)
+tts_processor = None
+tts_model = None
+tts_vocoder = None
+tts_model_type = None  # 'speecht5' or 'bark'
+korean_tts_available = False
+
+# 한국어 TTS 라이브러리 확인
+try:
+    from TTS.api import TTS
+    korean_tts_available = True
+except ImportError:
+    try:
+        import gtts
+        korean_tts_available = True
+    except ImportError:
+        korean_tts_available = False
 
 def load_chatbot_model():
     """한국어 챗봇 모델 로딩"""
     global chatbot_tokenizer, chatbot_model
     if chatbot_tokenizer is None or chatbot_model is None:
-        # 한국어 지원 모델 사용 (실제로 존재하는 모델들)
-        # 우선순위: 작은 모델부터 시도 (빠른 로딩, 적은 메모리)
-        model_candidates = [
-            "skt/kogpt2-base-v2",  # SKT의 KoGPT2 (작고 빠름, 한국어 지원)
-            "gpt2",  # 기본 GPT2 (영어지만 작고 안정적, 폴백용)
-        ]
+        model_candidates = ["skt/kogpt2-base-v2", "gpt2"]
         
         for model_name in model_candidates:
-            print(f"챗봇 모델 로딩 시도: {model_name}...")
             try:
                 chatbot_tokenizer = AutoTokenizer.from_pretrained(model_name)
-                
-                # GPU/CPU 설정 - GPU가 있으면 무조건 GPU 사용
                 use_cuda = torch.cuda.is_available()
-                if use_cuda:
-                    # GPU 사용 시 - 무조건 GPU 모드
-                    print(f"GPU 감지됨: {torch.cuda.get_device_name(0)}")
-                    try:
-                        # accelerate가 있으면 최적화 옵션 사용
-                        chatbot_model = AutoModelForCausalLM.from_pretrained(
-                            model_name,
-                            torch_dtype=torch.float16,
-                            device_map="auto",
-                            low_cpu_mem_usage=True
-                        )
-                        # device_map="auto"를 사용하면 자동으로 GPU에 할당되지만, 명시적으로 확인
-                        if hasattr(chatbot_model, 'device'):
-                            print(f"모델이 {chatbot_model.device}에 로드됨")
-                        else:
-                            # device_map을 사용했지만 확인을 위해 첫 번째 파라미터의 device 확인
-                            first_param = next(chatbot_model.parameters())
-                            print(f"모델이 {first_param.device}에 로드됨")
-                    except Exception as e:
-                        print(f"accelerate 최적화 실패, 기본 GPU 모드로 전환: {e}")
-                        # accelerate가 없으면 기본 방식으로 GPU에 명시적으로 로드
-                        chatbot_model = AutoModelForCausalLM.from_pretrained(
-                            model_name,
-                            torch_dtype=torch.float16
-                        )
-                        chatbot_model = chatbot_model.to("cuda")
-                        chatbot_model.eval()
-                        print(f"모델이 cuda에 명시적으로 로드됨")
-                else:
-                    # GPU가 없으면 에러 메시지와 함께 CPU 사용
-                    print("경고: GPU를 감지할 수 없습니다. CPU 모드로 작동합니다.")
-                    print("GPU를 사용하려면 CUDA가 설치된 GPU가 필요합니다.")
-                    chatbot_model = AutoModelForCausalLM.from_pretrained(
-                        model_name,
-                        torch_dtype=torch.float32
-                    )
-                    chatbot_model = chatbot_model.to("cpu")
-                    chatbot_model.eval()
                 
-                # 패딩 토큰 설정
+                if use_cuda:
+                    try:
+                        chatbot_model = AutoModelForCausalLM.from_pretrained(
+                            model_name, torch_dtype=torch.float16,
+                            device_map="auto", low_cpu_mem_usage=True
+                        )
+                    except Exception:
+                        chatbot_model = AutoModelForCausalLM.from_pretrained(
+                            model_name, torch_dtype=torch.float16
+                        )
+                        chatbot_model = chatbot_model.to("cuda").eval()
+                else:
+                    chatbot_model = AutoModelForCausalLM.from_pretrained(
+                        model_name, torch_dtype=torch.float32
+                    ).to("cpu").eval()
+                
                 if chatbot_tokenizer.pad_token is None:
                     chatbot_tokenizer.pad_token = chatbot_tokenizer.eos_token
                 
                 print(f"챗봇 모델 로딩 완료: {model_name} ({'GPU' if use_cuda else 'CPU'} 모드)")
-                break  # 성공하면 루프 종료
-                
+                break
             except Exception as e:
                 print(f"모델 {model_name} 로딩 실패: {e}")
                 chatbot_tokenizer = None
                 chatbot_model = None
-                continue  # 다음 모델 시도
-        
-        if chatbot_tokenizer is None or chatbot_model is None:
-            print("모든 챗봇 모델 로딩 실패. 규칙 기반 응답만 사용 가능합니다.")
     
     return chatbot_tokenizer, chatbot_model
+
+def load_tts_model():
+    """TTS 모델 로딩 (영어용 - Bark만 사용)"""
+    global tts_processor, tts_model, tts_vocoder, tts_model_type
+    
+    if tts_model_type == 'bark' and tts_model is not None:
+        return tts_processor, tts_model, tts_vocoder
+    
+    # 기존 모델 정리
+    tts_processor = None
+    tts_model = None
+    tts_vocoder = None
+    
+    use_cuda = torch.cuda.is_available()
+    device = "cuda" if use_cuda else "cpu"
+    
+    try:
+        print("Bark TTS 모델 로딩 중... (고품질)")
+        from transformers import BarkModel, AutoProcessor
+        
+        model_name = "suno/bark-small"  # 또는 "suno/bark" (더 큰 모델, 더 좋은 품질)
+        tts_processor = AutoProcessor.from_pretrained(model_name)
+        tts_model = BarkModel.from_pretrained(model_name)
+        
+        if use_cuda:
+            tts_model = tts_model.to(device)
+        else:
+            tts_model = tts_model.to(device)
+        
+        tts_model.eval()
+        tts_model_type = 'bark'
+        print(f"Bark TTS 모델 로딩 완료 ({'GPU' if use_cuda else 'CPU'} 모드)")
+    except Exception as e:
+        print(f"Bark 모델 로딩 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        tts_processor = None
+        tts_model = None
+        tts_vocoder = None
+        tts_model_type = None
+    
+    return tts_processor, tts_model, tts_vocoder
+
+def detect_language(text):
+    """텍스트 언어 감지 (간단한 휴리스틱)"""
+    korean_chars = sum(1 for char in text if '\uAC00' <= char <= '\uD7A3')
+    total_chars = len([c for c in text if c.isalpha()])
+    if total_chars > 0:
+        korean_ratio = korean_chars / total_chars
+        return 'ko' if korean_ratio > 0.3 else 'en'
+    return 'en'
+
+def split_text_for_tts(text, max_length=400):
+    """TTS를 위한 텍스트 분할 (문장 단위로 분할)"""
+    # 문장 끝 구분자로 분할
+    sentences = re.split(r'([.!?]\s+)', text)
+    
+    chunks = []
+    current_chunk = ""
+    
+    for i in range(0, len(sentences), 2):
+        sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else "")
+        
+        # 현재 청크에 문장을 추가했을 때 길이 확인
+        test_chunk = current_chunk + sentence if current_chunk else sentence
+        
+        # 토큰 길이 대략 추정 (공백 포함 단어 수의 1.3배)
+        estimated_length = len(test_chunk.split()) * 1.3
+        
+        if estimated_length > max_length and current_chunk:
+            # 현재 청크 저장하고 새 청크 시작
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+        else:
+            current_chunk = test_chunk
+    
+    # 마지막 청크 추가
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # 청크가 없으면 원본 텍스트 반환 (너무 짧은 경우)
+    if not chunks:
+        chunks = [text]
+    
+    return chunks
 
 def get_downloaded_files():
     return sorted(os.listdir(app.config['DOWNLOAD_FOLDER']), reverse=True)
 
-def get_musicgen_files():
-    """MusicGen 관련 파일만 필터링"""
+def get_tts_files():
+    """TTS 관련 파일만 필터링"""
     files = get_downloaded_files()
-    return [f for f in files if f.endswith(('.mp3', '.png'))]
+    return [f for f in files if f.startswith('tts_') and (f.endswith('.wav') or f.endswith('.mp3'))]
 
 @app.route('/')
 def index():
     files = get_downloaded_files()
-    musicgen_files = get_musicgen_files()
-    return render_template('index.html', files=files, musicgen_files=musicgen_files)
+    tts_files = get_tts_files()
+    return render_template('index.html', files=files, tts_files=tts_files)
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -153,22 +248,11 @@ def download():
     # ffmpeg 사용 가능 여부 확인
     ffmpeg_available = check_ffmpeg_available()
     
-    # 형식 옵션 선택 (더 유연한 선택 우선)
-    if ffmpeg_available:
-        format_options = [
-            'bestvideo+bestaudio/best',  # 가장 유연한 형식 먼저
-            'best',  # 단일 최고 품질
-            'worst',  # 최후의 수단
-        ]
-    else:
-        format_options = [
-            'best',  # 이미 병합된 형식만
-            'best[height<=720]',
-            'best[height<=480]',
-            'worst',
-        ]
+    format_options = (
+        ['bestvideo+bestaudio/best', 'best', 'worst'] if ffmpeg_available
+        else ['best', 'best[height<=720]', 'best[height<=480]', 'worst']
+    )
     
-    # 다운로드 시도
     last_error = None
     for format_str in format_options:
         if not ffmpeg_available and '+' in format_str:
@@ -179,8 +263,6 @@ def download():
                 'outtmpl': os.path.join(app.config['DOWNLOAD_FOLDER'], '%(title)s.%(ext)s'),
                 'format': format_str,
                 'noplaylist': True,
-                'quiet': False,
-                'no_warnings': False,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -189,21 +271,12 @@ def download():
         except Exception as e:
             last_error = str(e)
             error_str = str(e).lower()
-            # 형식 관련 오류면 다음 형식 시도
-            if any(kw in error_str for kw in ['format is not available', 'requested format', 'format']):
+            if any(kw in error_str for kw in ['format is not available', 'requested format', 'format', 'ffmpeg', 'merging', 'network', 'timeout', 'unavailable', 'connection']):
                 continue
-            # ffmpeg/merging 오류면 다음 형식 시도
-            if any(kw in error_str for kw in ['ffmpeg', 'merging']):
-                continue
-            # 네트워크 오류도 재시도
-            if any(kw in error_str for kw in ['network', 'timeout', 'unavailable', 'connection']):
-                continue
-            # 그 외 오류는 중단
             break
     
-    # 모든 시도 실패
     error_msg = last_error or 'Unknown error'
-    if 'format is not available' in error_msg.lower() or 'requested format' in error_msg.lower():
+    if 'format' in error_msg.lower():
         error_msg += ' (해당 동영상에 사용 가능한 형식이 없습니다. YouTube 제한일 수 있습니다.)'
     elif 'ffmpeg' in error_msg.lower() or 'merging' in error_msg.lower():
         error_msg += ' (ffmpeg가 설치되어 있지 않거나 PATH에 없습니다.)'
@@ -248,6 +321,118 @@ def edit():
 
     return redirect(url_for('index'))
 
+@app.route('/add_tts_to_video', methods=['POST'])
+def add_tts_to_video():
+    """동영상에 TTS 음성 추가/교체"""
+    video_filename = request.form.get('video_filename')
+    tts_filename = request.form.get('tts_filename')
+    audio_mode = request.form.get('audio_mode', 'replace')  # 'replace' 또는 'add'
+    output_filename = request.form.get('output_filename', '').strip()
+    
+    if not video_filename or not tts_filename:
+        flash('동영상 파일과 TTS 파일을 모두 선택해주세요.', 'danger')
+        return redirect(url_for('index'))
+    
+    video_path = os.path.join(app.config['DOWNLOAD_FOLDER'], video_filename)
+    tts_path = os.path.join(app.config['DOWNLOAD_FOLDER'], tts_filename)
+    
+    if not os.path.exists(video_path):
+        flash(f'동영상 파일을 찾을 수 없습니다: {video_filename}', 'danger')
+        return redirect(url_for('index'))
+    
+    if not os.path.exists(tts_path):
+        flash(f'TTS 파일을 찾을 수 없습니다: {tts_filename}', 'danger')
+        return redirect(url_for('index'))
+    
+    # 출력 파일명 생성 (사용자 지정 또는 기본값)
+    if not output_filename:
+        # 기본값: 원본 파일명_with_tts
+        name, ext = os.path.splitext(video_filename)
+        output_filename = f"{name}_with_tts{ext}"
+    else:
+        # 사용자가 지정한 파일명 사용
+        # 확장자가 없으면 원본 동영상의 확장자 추가
+        if '.' not in output_filename:
+            _, ext = os.path.splitext(video_filename)
+            output_filename = output_filename + ext
+        # 안전한 파일명으로 변환
+        output_filename = secure_filename(output_filename)
+    
+    output_path = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
+    
+    try:
+        # 동영상에 오디오 스트림이 있는지 확인
+        check_audio_cmd = [
+            'ffmpeg',
+            '-i', video_path,
+            '-hide_banner'
+        ]
+        check_result = subprocess.run(check_audio_cmd, capture_output=True, text=True)
+        # ffmpeg는 정보를 stderr로 출력하므로 stderr 확인
+        # stderr가 None일 수 있으므로 안전하게 처리
+        stderr_output = check_result.stderr or ''
+        stdout_output = check_result.stdout or ''
+        has_audio = 'Audio:' in stderr_output or 'Stream #0:1' in stderr_output or 'Audio:' in stdout_output
+        
+        if audio_mode == 'replace':
+            # 기존 오디오를 TTS로 교체 (오디오가 없어도 TTS 추가)
+            command = [
+                'ffmpeg',
+                '-y',
+                '-i', video_path,
+                '-i', tts_path,
+                '-c:v', 'copy',  # 비디오 코덱 복사
+                '-c:a', 'aac',   # 오디오 코덱 변환
+                '-map', '0:v:0',  # 첫 번째 입력의 비디오 스트림
+                '-map', '1:a:0',  # 두 번째 입력의 오디오 스트림
+                '-shortest',      # 가장 짧은 스트림에 맞춤
+                output_path
+            ]
+        else:  # add (믹스)
+            if has_audio:
+                # 기존 오디오와 TTS를 믹스
+                command = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', video_path,
+                    '-i', tts_path,
+                    '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[a]',
+                    '-map', '0:v:0',
+                    '-map', '[a]',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    output_path
+                ]
+            else:
+                # 오디오가 없으면 TTS만 추가
+                flash('동영상에 오디오가 없어서 TTS만 추가합니다.', 'info')
+                command = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', video_path,
+                    '-i', tts_path,
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    '-shortest',
+                    output_path
+                ]
+        
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        flash(f'TTS 음성이 적용되었습니다: {output_filename}', 'success')
+        
+    except subprocess.CalledProcessError as e:
+        error_message = e.stderr.decode() if e.stderr else str(e)
+        print(f"ffmpeg 오류: {error_message}")
+        flash(f'TTS 적용 실패: {error_message[:200]}', 'danger')
+    except FileNotFoundError:
+        flash('오류: ffmpeg가 설치되어 있지 않거나 PATH에 없습니다.', 'danger')
+    except Exception as e:
+        flash(f'TTS 적용 중 오류 발생: {str(e)}', 'danger')
+    
+    return redirect(url_for('index'))
+
 @app.route('/extract_frame', methods=['POST'])
 def extract_frame():
     """동영상에서 특정 시간의 프레임을 이미지로 추출"""
@@ -264,22 +449,14 @@ def extract_frame():
         flash('파일을 찾을 수 없습니다.', 'danger')
         return redirect(url_for('index'))
     
-    # 이미지 파일명 생성
     name, ext = os.path.splitext(filename)
-    # 시간을 파일명에 사용 가능한 형식으로 변환 (콜론 제거)
     time_str = frame_time.replace(':', '-')
     output_filename = f"{name}_frame_{time_str}.jpg"
     output_path = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
     
-    # ffmpeg를 사용하여 프레임 추출
     command = [
-        'ffmpeg',
-        '-y',
-        '-ss', frame_time,
-        '-i', input_path,
-        '-vframes', '1',
-        '-q:v', '2',  # 고품질
-        output_path
+        'ffmpeg', '-y', '-ss', frame_time, '-i', input_path,
+        '-vframes', '1', '-q:v', '2', output_path
     ]
     
     try:
@@ -296,212 +473,6 @@ def extract_frame():
 @app.route('/downloads/<path:filename>')
 def download_file(filename):
     return send_from_directory(app.config['DOWNLOAD_FOLDER'], filename, as_attachment=True)
-
-@app.route('/musicgen', methods=['POST'])
-def musicgen():
-    prompt = request.form.get('prompt')
-    duration = request.form.get('duration', '30')  # 기본값 30초
-    
-    if not prompt:
-        flash('프롬프트를 입력하세요.', 'danger')
-        return redirect(url_for('index'))
-    
-    # duration을 초 단위로 변환하고 토큰 수 계산
-    try:
-        duration_seconds = int(duration)
-    except ValueError:
-        duration_seconds = 30
-    
-    # MusicGen은 대략 5-10초당 256 토큰 정도 생성 가능
-    # 모델의 최대 위치 임베딩을 고려하여 안전한 값으로 제한
-    # MusicGen-small 모델의 경우 일반적으로 2048 토큰이 안전한 최대값
-    MAX_SAFE_TOKENS = 1536  # 안전한 최대 토큰 수 (약 2분)
-    
-    if duration_seconds <= 15:
-        max_new_tokens = 256
-    elif duration_seconds <= 30:
-        max_new_tokens = 512
-    elif duration_seconds <= 60:
-        max_new_tokens = 1024
-    elif duration_seconds <= 120:
-        max_new_tokens = 1536  # 안전한 최대값
-    else:
-        max_new_tokens = MAX_SAFE_TOKENS  # 최대값 제한
-        flash(f'요청하신 길이({duration_seconds}초)가 너무 깁니다. 최대 {MAX_SAFE_TOKENS} 토큰(약 2분)으로 제한됩니다.', 'warning')
-    
-    processor, model = load_musicgen()
-    # MusicGen inference
-    inputs = processor(text=[prompt], padding=True, return_tensors="pt")
-    
-    # 모델의 최대 위치 임베딩 길이 확인
-    max_position_embeddings = getattr(model.config, 'max_position_embeddings', None)
-    if max_position_embeddings is None:
-        # 기본값 사용 (MusicGen-small의 경우 일반적으로 2048)
-        max_position_embeddings = 2048
-    
-    # 입력 시퀀스 길이 확인 및 제한
-    input_ids = inputs.get('input_ids', None)
-    if input_ids is not None:
-        input_length = input_ids.shape[1]
-        # 입력 길이 + 생성할 토큰 수가 최대값을 초과하지 않도록 조정
-        if input_length + max_new_tokens > max_position_embeddings:
-            max_new_tokens = max(256, max_position_embeddings - input_length - 50)  # 여유 공간 확보
-            flash(f'입력 길이를 고려하여 max_new_tokens를 {max_new_tokens}로 조정했습니다.', 'info')
-    
-    try:
-        with torch.no_grad():
-            audio_values = model.generate(**inputs, max_new_tokens=max_new_tokens)
-    except IndexError as e:
-        # IndexError 발생 시 더 작은 값으로 재시도
-        flash(f'토큰 수가 너무 큽니다. 더 작은 값으로 재시도합니다.', 'warning')
-        max_new_tokens = min(512, max_new_tokens // 2)
-        if input_ids is not None:
-            input_length = input_ids.shape[1]
-            if input_length + max_new_tokens > max_position_embeddings:
-                max_new_tokens = max(256, max_position_embeddings - input_length - 50)
-        with torch.no_grad():
-            audio_values = model.generate(**inputs, max_new_tokens=max_new_tokens)
-    # 오디오 저장 (MP3 또는 WAV)
-    mp3_filename = f"musicgen_{prompt.replace(' ', '_')}.mp3"
-    mp3_path = os.path.join(DOWNLOAD_FOLDER, mp3_filename)
-    
-    # torchaudio로 저장 시도, 실패하면 soundfile 사용
-    audio_data = audio_values[0].cpu().numpy()
-    if audio_data.ndim > 1:
-        audio_data = audio_data.squeeze()
-    
-    # 오디오 정규화: 클리핑 방지를 위해 진폭을 -1.0~1.0 범위로 제한
-    # 약간의 헤드룸(-0.95~0.95)을 남겨서 안전하게 저장
-    max_amplitude = np.max(np.abs(audio_data))
-    if max_amplitude > 0:
-        # 최대 진폭이 0.95를 넘지 않도록 스케일링
-        target_max = 0.95
-        if max_amplitude > target_max:
-            audio_data = audio_data * (target_max / max_amplitude)
-    # 추가 안전장치: -1.0~1.0 범위를 벗어나는 값은 클리핑
-    audio_data = np.clip(audio_data, -0.95, 0.95)
-    
-    try:
-        # soundfile로 WAV 저장 후 필요시 MP3로 변환 (더 안정적)
-        wav_path = mp3_path.replace('.mp3', '.wav')
-        if SOUNDFILE_AVAILABLE:
-            sf.write(wav_path, audio_data, 32000)
-            # pydub를 사용하여 WAV를 MP3로 변환
-            try:
-                from pydub import AudioSegment
-                audio = AudioSegment.from_wav(wav_path)
-                audio.export(mp3_path, format="mp3")
-                os.remove(wav_path)  # 임시 WAV 파일 삭제
-            except:
-                # MP3 변환 실패 시 WAV 파일명 사용
-                mp3_filename = wav_path
-                mp3_path = wav_path
-        else:
-            # soundfile 없으면 torchaudio로 WAV 저장 시도 (정규화된 데이터 사용)
-            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
-            torchaudio.save(wav_path, audio_tensor, 32000, format="wav")
-            mp3_filename = wav_path
-            mp3_path = wav_path
-    except Exception as e:
-        # 모든 저장 방법 실패 시 torchaudio WAV로 fallback (정규화된 데이터 사용)
-        try:
-            wav_path = mp3_path.replace('.mp3', '.wav')
-            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
-            torchaudio.save(wav_path, audio_tensor, 32000, format="wav")
-            mp3_filename = wav_path
-            mp3_path = wav_path
-        except:
-            flash(f'오디오 저장 실패: {str(e)}', 'danger')
-            return redirect(url_for('index'))
-    # Waveform 이미지 생성 (WAV나 MP3 모두 로드 가능)
-    y, sr = librosa.load(mp3_path, sr=None)
-    plt.figure(figsize=(10, 3))
-    librosa.display.waveshow(y, sr=sr)
-    plt.title('Waveform')
-    waveform_path = os.path.join(DOWNLOAD_FOLDER, f"{mp3_filename}_waveform.png")
-    plt.savefig(waveform_path)
-    plt.close()
-    # Spectrogram 이미지 생성
-    D = librosa.amplitude_to_db(np.abs(librosa.stft(y)), ref=np.max)
-    plt.figure(figsize=(10, 3))
-    librosa.display.specshow(D, sr=sr, x_axis='time', y_axis='log')
-    plt.colorbar(format='%+2.0f dB')
-    plt.title('Spectrogram')
-    spectrogram_path = os.path.join(DOWNLOAD_FOLDER, f"{mp3_filename}_spectrogram.png")
-    plt.savefig(spectrogram_path)
-    plt.close()
-    flash(f'MusicGen 결과가 생성되었습니다: {mp3_filename}', 'success')
-    return redirect(url_for('index'))
-
-@app.route('/extract_embedding', methods=['POST'])
-def extract_embedding():
-    try:
-        file = request.files.get('mp3file')
-        if not file or not file.filename or not file.filename.endswith('.mp3'):
-            flash('MP3 파일만 업로드 가능합니다.', 'danger')
-            return redirect(url_for('index'))
-        filename = secure_filename(file.filename)
-        save_path = os.path.join(DOWNLOAD_FOLDER, filename)
-        file.save(save_path)
-
-        y, sr = librosa.load(save_path, sr=32000, mono=True)
-        if y.ndim > 1:
-            y = librosa.to_mono(y)
-        if y.dtype != np.float32:
-            y = y.astype(np.float32)
-        y = y[:32000*30]
-        audio_input = y
-
-        processor, model = load_musicgen()
-        inputs = processor(audio=audio_input, sampling_rate=32000, return_tensors='pt')
-        input_values = inputs.get('input_values', None)
-        if input_values is None:
-            flash('임베딩 추출 실패: 입력값 오류', 'danger')
-            return redirect(url_for('index'))
-        with torch.no_grad():
-            if hasattr(model, 'encodec'):
-                wav = input_values.unsqueeze(1)
-                frame_embeddings = model.encodec.encoder(wav)  # type: ignore
-                if hasattr(frame_embeddings, 'audio_embeds'):
-                    embedding_tensor = frame_embeddings.audio_embeds
-                elif isinstance(frame_embeddings, dict) and 'audio_embeds' in frame_embeddings:
-                    embedding_tensor = frame_embeddings['audio_embeds']
-                elif isinstance(frame_embeddings, torch.Tensor):
-                    embedding_tensor = frame_embeddings
-                else:
-                    flash('임베딩 추출 실패: encodec 결과 오류', 'danger')
-                    return redirect(url_for('index'))
-            elif hasattr(model, 'audio_encoder'):
-                wav = input_values
-                try:
-                    frame_embeddings = model.audio_encoder(wav)  # type: ignore
-                except Exception as e:
-                    flash(f'임베딩 추출 실패: audio_encoder 호출 예외: {str(e)}', 'danger')
-                    return redirect(url_for('index'))
-                # audio_codes를 임베딩으로 사용
-                if hasattr(frame_embeddings, 'audio_codes'):
-                    embedding_tensor = frame_embeddings.audio_codes
-                elif isinstance(frame_embeddings, dict) and 'audio_codes' in frame_embeddings:
-                    embedding_tensor = frame_embeddings['audio_codes']
-                elif isinstance(frame_embeddings, torch.Tensor):
-                    embedding_tensor = frame_embeddings
-                else:
-                    flash(f'임베딩 추출 실패: audio_encoder 결과 오류, 반환값 타입: {type(frame_embeddings)}', 'danger')
-                    return redirect(url_for('index'))
-            else:
-                flash('임베딩 추출 실패: 모델 구조 오류', 'danger')
-                return redirect(url_for('index'))
-
-            embedding = embedding_tensor.mean(dim=tuple(range(1, embedding_tensor.ndim))).squeeze().cpu().numpy()
-
-        embedding_filename = f"{filename}_embedding.npy"
-        embedding_path = os.path.join(DOWNLOAD_FOLDER, embedding_filename)
-        np.save(embedding_path, embedding)
-        flash(f'임베딩 추출 완료: {embedding_filename}', 'success')
-        return redirect(url_for('index'))
-    except Exception as e:
-        flash(f'임베딩 추출 실패: {str(e)}', 'danger')
-        return redirect(url_for('index'))
 
 # 설문조사 자동화 관련 임포트
 try:
@@ -594,15 +565,89 @@ def fill_survey():
             'type': type(e).__name__
         }), 500
 
+def handle_file_operations(user_message: str) -> tuple[str, bool]:
+    """파일 작업 처리 (읽기, 쓰기, 생성 등)"""
+    user_lower = user_message.lower()
+    
+    # 파일 읽기 요청
+    if any(keyword in user_lower for keyword in ['파일 읽', '파일 보', '파일 내용', 'read file', 'show file', 'file content']):
+        # 파일명 추출 시도
+        import re
+        file_patterns = [
+            r'["\']([^"\']+\.[a-zA-Z]+)["\']',
+            r'([a-zA-Z0-9_\-]+\.(py|txt|js|html|css|json|md|yml|yaml))',
+        ]
+        for pattern in file_patterns:
+            match = re.search(pattern, user_message)
+            if match:
+                filename = match.group(1)
+                try:
+                    if os.path.exists(filename):
+                        with open(filename, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        return f"파일 '{filename}' 내용:\n\n```\n{content[:1000]}{'...' if len(content) > 1000 else ''}\n```", True
+                    else:
+                        return f"파일 '{filename}'을 찾을 수 없습니다.", True
+                except Exception as e:
+                    return f"파일 읽기 오류: {str(e)}", True
+    
+    # 파일 생성/쓰기 요청
+    if any(keyword in user_lower for keyword in ['파일 만들', '파일 생성', '파일 쓰', 'create file', 'write file', 'make file']):
+        return "파일 생성/수정 기능을 사용하려면 파일명과 내용을 명확히 알려주세요.\n예: 'test.py 파일을 만들고 print(\"hello\") 코드를 작성해줘'", True
+    
+    return "", False
+
+def search_knowledge_base(query: str) -> list:
+    """지식 베이스에서 관련 정보 검색"""
+    global knowledge_base
+    results = []
+    query_lower = query.lower()
+    
+    for qa in knowledge_base.get('qa_pairs', []):
+        question = qa.get('question', '').lower()
+        if any(word in question for word in query_lower.split()):
+            results.append(qa)
+    
+    return results[:3]  # 상위 3개만 반환
+
 def get_chatbot_response(user_message: str, conversation_history: list = None) -> str:
     """로컬 Transformer 모델을 사용한 챗봇 응답 생성"""
+    global knowledge_base, learning_data
+    
     if conversation_history is None:
         conversation_history = []
     
+    # 파일 작업 처리 시도
+    file_response, handled = handle_file_operations(user_message)
+    if handled:
+        return file_response
+    
+    # 지식 베이스 검색
+    kb_results = search_knowledge_base(user_message)
+    kb_context = ""
+    if kb_results:
+        kb_context = "\n\n학습된 지식:\n"
+        for qa in kb_results:
+            kb_context += f"Q: {qa.get('question')}\nA: {qa.get('answer')}\n\n"
+    
+    # Few-shot 예제 추가
+    examples = ""
+    if knowledge_base.get('examples'):
+        examples = "\n\n예제 대화:\n"
+        for ex in knowledge_base.get('examples', [])[:2]:
+            examples += f"사용자: {ex.get('user')}\n조수: {ex.get('assistant')}\n\n"
+    
     # 시스템 프롬프트: 편집 작업을 도와주는 조수 역할
-    system_prompt = """당신은 편집 작업을 도와주는 친절한 한국어 조수입니다. 
-사용자가 코드 작성, 파일 편집, 문제 해결 등을 도와달라고 요청하면 도움을 제공하세요.
-항상 한국어로 친절하고 명확하게 답변하세요."""
+    system_prompt = f"""당신은 편집 작업을 도와주는 친절한 한국어 조수입니다. 
+다음 기능들을 제공할 수 있습니다:
+1. 코드 작성 및 수정: Python, JavaScript, HTML, CSS 등 다양한 언어의 코드 작성
+2. 파일 편집: 파일 읽기, 생성, 수정, 삭제
+3. 문제 해결: 에러 분석, 버그 수정, 코드 최적화
+4. 코드 리뷰: 코드 품질 개선, 스타일 가이드 준수
+5. 문서화: 주석 추가, README 작성
+
+사용자가 구체적인 요청을 하면 실용적이고 실행 가능한 코드나 해결책을 제공하세요.
+항상 한국어로 친절하고 명확하게 답변하세요.{kb_context}{examples}"""
     
     try:
         # 로컬 Transformer 모델 로딩
@@ -611,14 +656,7 @@ def get_chatbot_response(user_message: str, conversation_history: list = None) -
         if tokenizer is None or model is None:
             return "죄송합니다. 챗봇 모델을 로드할 수 없습니다. 모델 다운로드 중 오류가 발생했을 수 있습니다."
         
-        # 대화 히스토리와 현재 메시지를 프롬프트로 구성
-        # KoGPT2는 일반 텍스트 생성 모델이므로 간단한 형식 사용
-        prompt_parts = []
-        
-        # 시스템 프롬프트 (간단하게)
-        prompt_parts.append(f"편집 조수: {system_prompt}\n")
-        
-        # 최근 대화 히스토리 추가 (최대 3개, 너무 길면 메모리 부족)
+        prompt_parts = [f"편집 조수: {system_prompt}\n"]
         for msg in conversation_history[-3:]:
             role = msg.get('role', 'user')
             content = msg.get('content', '')
@@ -626,10 +664,7 @@ def get_chatbot_response(user_message: str, conversation_history: list = None) -
                 prompt_parts.append(f"사용자: {content}\n")
             elif role == 'assistant':
                 prompt_parts.append(f"조수: {content}\n")
-        
-        # 현재 사용자 메시지 추가
         prompt_parts.append(f"사용자: {user_message}\n조수:")
-        
         full_prompt = "".join(prompt_parts)
         
         # 토큰화
@@ -641,19 +676,9 @@ def get_chatbot_response(user_message: str, conversation_history: list = None) -
             padding=True
         )
         
-        # GPU/CPU 설정 - GPU가 있으면 무조건 GPU 사용
-        use_cuda = torch.cuda.is_available()
-        if use_cuda:
-            device = "cuda"
-            # 모델이 이미 GPU에 있는지 확인하고, 없으면 이동
-            if not next(model.parameters()).is_cuda:
-                model = model.to(device)
-        else:
-            device = "cpu"
-            # GPU가 없으면 CPU 사용
-            if not next(model.parameters()).is_cpu:
-                model = model.to(device)
-        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if not next(model.parameters()).is_cuda if device == "cuda" else not next(model.parameters()).is_cpu:
+            model = model.to(device)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
         # 생성
@@ -672,41 +697,41 @@ def get_chatbot_response(user_message: str, conversation_history: list = None) -
         # 디코딩
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # 조수 응답 부분만 추출
         if "조수:" in generated_text:
-            # 마지막 "조수:" 이후의 텍스트 추출
             response = generated_text.split("조수:")[-1].strip()
-            # 다음 "사용자:" 또는 줄바꿈 전까지
             if "\n사용자:" in response:
                 response = response.split("\n사용자:")[0].strip()
             if "\n" in response:
-                # 첫 번째 문장만 사용 (더 자연스러운 응답)
                 response = response.split("\n")[0].strip()
         else:
-            # 프롬프트 제거
             response = generated_text[len(full_prompt):].strip()
-            # 줄바꿈이나 특수 문자 제거
             if "\n" in response:
                 response = response.split("\n")[0].strip()
         
-        # 빈 응답 처리
         if not response or len(response) < 3:
             response = "죄송합니다. 적절한 응답을 생성하지 못했습니다. 다시 질문해주세요."
-        
-        # 응답 정리 (너무 길면 자르기)
         if len(response) > 500:
             response = response[:500] + "..."
+        
+        # 학습 데이터에 대화 저장
+        learning_data['conversations'].append({
+            'user': user_message,
+            'assistant': response,
+            'timestamp': datetime.now().isoformat()
+        })
+        if len(learning_data['conversations']) > 1000:
+            learning_data['conversations'] = learning_data['conversations'][-1000:]
+        save_learning_data(learning_data)
         
         return response
         
     except Exception as e:
         error_msg = str(e)
         print(f"챗봇 응답 생성 오류: {error_msg}")
-        # 폴백: 규칙 기반 응답
         user_lower = user_message.lower()
         
         if any(word in user_lower for word in ['안녕', 'hello', 'hi', '하이']):
-            return "안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요? (모델 오류로 간단한 응답만 가능합니다)"
+            return "안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요?"
         elif any(word in user_lower for word in ['파일', 'file', '코드', 'code']):
             return "파일이나 코드 작업을 도와드릴 수 있습니다. 구체적으로 어떤 작업이 필요하신가요?"
         elif any(word in user_lower for word in ['도움', 'help', '도와']):
@@ -737,6 +762,380 @@ def chatbot():
         return jsonify({
             'error': f'오류 발생: {str(e)}'
         }), 500
+
+@app.route('/chatbot/file/read', methods=['POST'])
+def chatbot_read_file():
+    """파일 읽기 API"""
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        filename = data.get('filename', '').strip()
+        
+        if not filename:
+            return jsonify({'error': '파일명을 입력해주세요.'}), 400
+        
+        if not os.path.exists(filename):
+            return jsonify({'error': f'파일을 찾을 수 없습니다: {filename}'}), 404
+        
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'content': content,
+                'size': len(content)
+            })
+        except Exception as e:
+            return jsonify({'error': f'파일 읽기 오류: {str(e)}'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+
+@app.route('/chatbot/file/write', methods=['POST'])
+def chatbot_write_file():
+    """파일 쓰기/생성 API"""
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        filename = data.get('filename', '').strip()
+        content = data.get('content', '')
+        mode = data.get('mode', 'w')  # 'w' (쓰기) 또는 'a' (추가)
+        
+        if not filename:
+            return jsonify({'error': '파일명을 입력해주세요.'}), 400
+        
+        # 보안: 상위 디렉토리 접근 방지
+        if '..' in filename or filename.startswith('/'):
+            return jsonify({'error': '잘못된 파일 경로입니다.'}), 400
+        
+        try:
+            with open(filename, mode, encoding='utf-8') as f:
+                f.write(content)
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'message': f'파일이 {"생성" if mode == "w" else "수정"}되었습니다.',
+                'size': len(content)
+            })
+        except Exception as e:
+            return jsonify({'error': f'파일 쓰기 오류: {str(e)}'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+
+@app.route('/chatbot/file/list', methods=['GET', 'POST'])
+def chatbot_list_files():
+    """현재 디렉토리 파일 목록 조회"""
+    try:
+        current_dir = request.args.get('dir', '.') or request.json.get('dir', '.') if request.is_json else '.'
+        
+        if not os.path.exists(current_dir):
+            return jsonify({'error': '디렉토리를 찾을 수 없습니다.'}), 404
+        
+        files = []
+        for item in os.listdir(current_dir):
+            item_path = os.path.join(current_dir, item)
+            files.append({
+                'name': item,
+                'type': 'directory' if os.path.isdir(item_path) else 'file',
+                'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            })
+        
+        return jsonify({
+            'success': True,
+            'directory': current_dir,
+            'files': sorted(files, key=lambda x: (x['type'] == 'file', x['name']))
+        })
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+
+@app.route('/chatbot/learn/qa', methods=['POST'])
+def chatbot_learn_qa():
+    """Q&A 쌍을 지식 베이스에 추가"""
+    global knowledge_base
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        question = data.get('question', '').strip()
+        answer = data.get('answer', '').strip()
+        
+        if not question or not answer:
+            return jsonify({'error': '질문과 답변을 모두 입력해주세요.'}), 400
+        
+        knowledge_base['qa_pairs'].append({
+            'question': question,
+            'answer': answer,
+            'timestamp': datetime.now().isoformat()
+        })
+        save_knowledge_base(knowledge_base)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Q&A 쌍이 학습되었습니다.',
+            'total_qa': len(knowledge_base['qa_pairs'])
+        })
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+
+@app.route('/chatbot/learn/example', methods=['POST'])
+def chatbot_learn_example():
+    """예제 대화를 지식 베이스에 추가"""
+    global knowledge_base
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        user_msg = data.get('user', '').strip()
+        assistant_msg = data.get('assistant', '').strip()
+        
+        if not user_msg or not assistant_msg:
+            return jsonify({'error': '사용자 메시지와 조수 응답을 모두 입력해주세요.'}), 400
+        
+        knowledge_base['examples'].append({
+            'user': user_msg,
+            'assistant': assistant_msg,
+            'timestamp': datetime.now().isoformat()
+        })
+        save_knowledge_base(knowledge_base)
+        
+        return jsonify({
+            'success': True,
+            'message': '예제 대화가 학습되었습니다.',
+            'total_examples': len(knowledge_base['examples'])
+        })
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+
+@app.route('/tts', methods=['POST'])
+def text_to_speech():
+    """텍스트를 음성으로 변환 (한국어/영어 자동 감지)"""
+    try:
+        text = request.form.get('text', '').strip()
+        language = request.form.get('language', 'auto')  # 'auto', 'ko', 'en'
+        
+        if not text:
+            flash('텍스트를 입력해주세요.', 'danger')
+            return redirect(url_for('index'))
+        
+        # 언어 자동 감지
+        if language == 'auto':
+            detected_lang = detect_language(text)
+        else:
+            detected_lang = language
+        
+        # 한국어 TTS 시도
+        if detected_lang == 'ko':
+            try:
+                # gTTS 사용 (간단하고 한국어 지원 좋음)
+                from gtts import gTTS
+                import io
+                
+                filename = f"tts_ko_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+                output_path = os.path.join(DOWNLOAD_FOLDER, filename)
+                
+                tts = gTTS(text=text, lang='ko', slow=False)
+                tts.save(output_path)
+                
+                flash(f'한국어 TTS 생성 완료: {filename}', 'success')
+                return redirect(url_for('index'))
+            except ImportError:
+                flash('한국어 TTS를 사용하려면 gTTS를 설치하세요: pip install gtts', 'warning')
+            except Exception as e:
+                print(f"한국어 TTS 오류: {e}, 영어 모델로 폴백")
+                detected_lang = 'en'
+        
+        # 영어 TTS (Bark만 사용)
+        if detected_lang == 'en':
+            processor, model, vocoder = load_tts_model()
+            
+            if processor is None or model is None:
+                flash('Bark TTS 모델을 로드할 수 없습니다. 모델이 설치되어 있는지 확인해주세요.', 'danger')
+                return redirect(url_for('index'))
+            
+            if tts_model_type != 'bark':
+                flash('TTS 모델이 올바르게 로드되지 않았습니다.', 'danger')
+                return redirect(url_for('index'))
+            
+            try:
+                print("Bark 모델로 음성 생성 중...")
+                use_cuda = torch.cuda.is_available()
+                device = "cuda" if use_cuda else "cpu"
+                
+                # Bark는 긴 텍스트를 자동으로 처리하므로 분할 불필요
+                # 하지만 너무 길면 분할
+                if len(text.split()) > 150:
+                    text_chunks = split_text_for_tts(text, max_length=150)
+                else:
+                    text_chunks = [text]
+                
+                speech_chunks = []
+                sample_rate = 24000  # Bark는 24kHz 샘플레이트
+                
+                for i, chunk in enumerate(text_chunks):
+                    try:
+                        print(f"청크 {i+1}/{len(text_chunks)} 처리 중: {chunk[:50]}...")
+                        
+                        # Bark 입력 처리
+                        inputs = processor(chunk, return_tensors="pt")
+                        inputs = {k: v.to(device) for k, v in inputs.items()}
+                        
+                        with torch.no_grad():
+                            # Bark는 generate 메서드로 오디오 생성
+                            # voice_preset은 선택사항 (더 자연스러운 음성)
+                            try:
+                                audio_array = model.generate(**inputs, pad_token_id=10000, voice_preset="v2/en_speaker_6")
+                            except:
+                                # voice_preset이 지원되지 않으면 기본 생성
+                                audio_array = model.generate(**inputs, pad_token_id=10000)
+                        
+                        # Bark 출력 처리 (오디오 배열 추출)
+                        if isinstance(audio_array, torch.Tensor):
+                            audio_array = audio_array.cpu().numpy()
+                        
+                        # 다차원 배열인 경우 평탄화
+                        if audio_array.ndim > 1:
+                            # Bark는 보통 (batch, samples) 형태
+                            if audio_array.shape[0] == 1:
+                                audio_array = audio_array[0]
+                            else:
+                                # 여러 샘플이 있으면 첫 번째 사용
+                                audio_array = audio_array.flatten()
+                        
+                        # 정규화 (-1.0 ~ 1.0 범위로)
+                        if audio_array.dtype != np.float32:
+                            audio_array = audio_array.astype(np.float32)
+                        
+                        # 값 범위 확인 및 정규화
+                        max_val = np.abs(audio_array).max()
+                        if max_val > 0:
+                            audio_array = audio_array / max_val
+                        
+                        audio_array = np.clip(audio_array, -1.0, 1.0)
+                        
+                        # 청크 간 침묵 추가
+                        silence = np.zeros(int(sample_rate * 0.3))
+                        speech_chunks.append(audio_array)
+                        if i < len(text_chunks) - 1:
+                            speech_chunks.append(silence)
+                        
+                    except Exception as e:
+                        print(f"Bark 청크 {i+1} 처리 오류: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        continue
+                
+                if not speech_chunks:
+                    flash('TTS 생성 실패: 모든 청크 처리에 실패했습니다.', 'danger')
+                    return redirect(url_for('index'))
+                
+                # 모든 청크 합치기
+                speech = np.concatenate(speech_chunks)
+                speech = np.clip(speech, -1.0, 1.0)
+                
+                filename = f"tts_en_bark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+                output_path = os.path.join(DOWNLOAD_FOLDER, filename)
+                sf.write(output_path, speech, sample_rate)
+                
+                flash(f'영어 TTS 생성 완료 (Bark): {filename}', 'success')
+                return redirect(url_for('index'))
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"Bark 모델 오류: {error_msg}")
+                import traceback
+                traceback.print_exc()
+                flash(f'TTS 생성 실패: {error_msg[:200]}', 'danger')
+                return redirect(url_for('index'))
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"TTS 생성 오류: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        flash(f'TTS 생성 실패: {error_msg[:200]}', 'danger')
+        return redirect(url_for('index'))
+
+@app.route('/chatbot/learn/feedback', methods=['POST'])
+def chatbot_learn_feedback():
+    """사용자 피드백 저장 및 학습"""
+    global learning_data
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        user_message = data.get('user_message', '').strip()
+        assistant_response = data.get('assistant_response', '').strip()
+        feedback = data.get('feedback', '').strip()  # 'good', 'bad', 'improve'
+        improvement = data.get('improvement', '').strip()  # 개선 제안
+        
+        learning_data['feedback'].append({
+            'user_message': user_message,
+            'assistant_response': assistant_response,
+            'feedback': feedback,
+            'improvement': improvement,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # 피드백이 'bad'이고 개선 제안이 있으면 지식 베이스에 추가
+        if feedback == 'bad' and improvement:
+            knowledge_base['qa_pairs'].append({
+                'question': user_message,
+                'answer': improvement,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'feedback'
+            })
+            save_knowledge_base(knowledge_base)
+        
+        save_learning_data(learning_data)
+        
+        return jsonify({
+            'success': True,
+            'message': '피드백이 저장되었습니다.'
+        })
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+
+@app.route('/chatbot/learn/stats', methods=['GET'])
+def chatbot_learn_stats():
+    """학습 통계 조회"""
+    global knowledge_base, learning_data
+    return jsonify({
+        'success': True,
+        'knowledge_base': {
+            'qa_pairs': len(knowledge_base.get('qa_pairs', [])),
+            'examples': len(knowledge_base.get('examples', []))
+        },
+        'learning_data': {
+            'conversations': len(learning_data.get('conversations', [])),
+            'feedback': len(learning_data.get('feedback', []))
+        }
+    })
+
+@app.route('/chatbot/learn/export', methods=['GET'])
+def chatbot_learn_export():
+    """학습 데이터 내보내기"""
+    global knowledge_base, learning_data
+    return jsonify({
+        'success': True,
+        'knowledge_base': knowledge_base,
+        'learning_data': learning_data
+    })
+
+@app.route('/chatbot/learn/import', methods=['POST'])
+def chatbot_learn_import():
+    """학습 데이터 가져오기"""
+    global knowledge_base, learning_data
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        
+        if 'knowledge_base' in data:
+            knowledge_base.update(data['knowledge_base'])
+            save_knowledge_base(knowledge_base)
+        
+        if 'learning_data' in data:
+            learning_data.update(data['learning_data'])
+            save_learning_data(learning_data)
+        
+        return jsonify({
+            'success': True,
+            'message': '학습 데이터가 가져와졌습니다.'
+        })
+    except Exception as e:
+        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True) 

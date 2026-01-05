@@ -26,11 +26,6 @@
             </button>
           </li>
           <li class="nav-item" role="presentation">
-            <button class="nav-link" id="musicgen-tab" data-bs-toggle="tab" data-bs-target="#musicgen" type="button" role="tab">
-              <span class="section-icon">🎵</span> MusicGen AI
-            </button>
-          </li>
-          <li class="nav-item" role="presentation">
             <button class="nav-link" id="survey-tab" data-bs-toggle="tab" data-bs-target="#survey" type="button" role="tab">
               <span class="section-icon">🤖</span> AI Survey
             </button>
@@ -38,6 +33,11 @@
           <li class="nav-item" role="presentation">
             <button class="nav-link" id="chatbot-tab" data-bs-toggle="tab" data-bs-target="#chatbot" type="button" role="tab">
               <span class="section-icon">💬</span> 편집 조수
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tts-tab" data-bs-toggle="tab" data-bs-target="#tts" type="button" role="tab">
+              <span class="section-icon">🔊</span> AI TTS
             </button>
           </li>
         </ul>
@@ -146,79 +146,60 @@
           </form>
         </div>
       </div>
-        </div>
 
-        <!-- MusicGen AI Tab -->
-        <div class="tab-pane fade" id="musicgen" role="tabpanel">
-      <h2 class="mt-3">MusicGen AI 생성</h2>
+      <!-- TTS 음성 적용 -->
       <div class="card my-4">
+        <div class="card-header">
+          <h5 class="mb-0">Add TTS Audio to Video (동영상에 TTS 음성 추가)</h5>
+        </div>
         <div class="card-body">
-          <form action="/musicgen" method="post">
+          <form action="/add_tts_to_video" method="post">
             <div class="mb-3">
-              <label for="prompt" class="form-label">MusicGen 프롬프트</label>
-              <input type="text" class="form-control" id="prompt" name="prompt" placeholder="예: lofi chill beat" required>
-            </div>
-            <div class="mb-3">
-              <label for="duration" class="form-label">음악 길이 (초)</label>
-              <select class="form-select" id="duration" name="duration">
-                <option value="15">15초 (짧음)</option>
-                <option value="30" selected>30초 (기본)</option>
-                <option value="60">1분</option>
-                <option value="120">2분 (권장)</option>
-                <option value="180">3분 (긴 음악)</option>
+              <label for="video_filename" class="form-label">동영상 파일 선택</label>
+              <select class="form-select" name="video_filename" id="video_filename" required>
+                <option selected disabled value="">동영상 파일 선택...</option>
+                {% for file in files %}
+                  {% if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')) %}
+                    <option value="{{ file }}">{{ file }}</option>
+                  {% endif %}
+                {% endfor %}
               </select>
-              <small class="form-text text-muted">더 긴 음악일수록 생성 시간이 오래 걸릴 수 있습니다.</small>
             </div>
-            <button type="submit" class="btn btn-success w-100">Generate Music</button>
-          </form>
-        </div>
-      </div>
-
-      <h2 class="mt-5">MusicGen 결과 미리보기/다운로드</h2>
-      <div class="row">
-        {% for file in musicgen_files %}
-          {% if file.endswith('.mp3') %}
-            <div class="col-md-4 mb-3">
-              <div class="card">
-                <div class="card-body">
-                  <h5 class="card-title">{{ file }}</h5>
-                  <audio controls src="{{ url_for('download_file', filename=file) }}" style="width:100%"></audio>
-                  <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-primary btn-sm mt-2">Download MP3</a>
-                </div>
-              </div>
-            </div>
-          {% elif file.endswith('_waveform.png') %}
-            <div class="col-md-4 mb-3">
-              <div class="card">
-                <div class="card-body">
-                  <h5 class="card-title">Waveform</h5>
-                  <img src="{{ url_for('download_file', filename=file) }}" alt="Waveform" class="img-fluid">
-                  <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-secondary btn-sm mt-2">Download Waveform</a>
-                </div>
-              </div>
-            </div>
-          {% elif file.endswith('_spectrogram.png') %}
-            <div class="col-md-4 mb-3">
-              <div class="card">
-                <div class="card-body">
-                  <h5 class="card-title">Spectrogram</h5>
-                  <img src="{{ url_for('download_file', filename=file) }}" alt="Spectrogram" class="img-fluid">
-                  <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-secondary btn-sm mt-2">Download Spectrogram</a>
-                </div>
-              </div>
-            </div>
-          {% endif %}
-        {% endfor %}
-      </div>
-
-      <h2 class="mt-5">MP3 임베딩 추출 (MusicGen)</h2>
-      <div class="card my-4">
-        <div class="card-body">
-          <form action="/extract_embedding" method="post" enctype="multipart/form-data">
             <div class="mb-3">
-              <input type="file" class="form-control" name="mp3file" accept=".mp3" required>
+              <label for="tts_filename" class="form-label">TTS 음성 파일 선택</label>
+              <select class="form-select" name="tts_filename" id="tts_filename" required>
+                <option selected disabled value="">TTS 파일 선택...</option>
+                {% for file in tts_files %}
+                  <option value="{{ file }}">{{ file }}</option>
+                {% endfor %}
+              </select>
+              {% if not tts_files %}
+                <small class="form-text text-muted text-danger">TTS 파일이 없습니다. 먼저 AI TTS 탭에서 음성을 생성하세요.</small>
+              {% else %}
+                <small class="form-text text-muted">AI TTS에서 생성한 음성 파일을 선택하세요.</small>
+              {% endif %}
             </div>
-            <button type="submit" class="btn btn-warning w-100">Extract Embedding</button>
+            <div class="mb-3">
+              <label for="audio_mode" class="form-label">오디오 처리 방식</label>
+              <select class="form-select" name="audio_mode" id="audio_mode">
+                <option value="replace" selected>기존 오디오 교체 (Replace)</option>
+                <option value="add">기존 오디오와 믹스 (Mix)</option>
+              </select>
+              <small class="form-text text-muted">
+                <strong>교체:</strong> 기존 오디오를 TTS로 완전히 교체합니다.<br>
+                <strong>믹스:</strong> 기존 오디오와 TTS를 함께 재생합니다.
+              </small>
+            </div>
+            <div class="mb-3">
+              <label for="output_filename" class="form-label">출력 파일명 (선택사항)</label>
+              <input type="text" class="form-control" id="output_filename" name="output_filename" 
+                     placeholder="예: my_video_with_voice.mp4 (비워두면 자동 생성)">
+              <small class="form-text text-muted">
+                출력 파일명을 지정하세요. 확장자를 입력하지 않으면 원본 동영상의 확장자가 자동으로 추가됩니다.
+                비워두면 "[원본파일명]_with_tts.[확장자]" 형식으로 자동 생성됩니다.
+              </small>
+            </div>
+            <button type="submit" class="btn btn-primary w-100" {% if not tts_files %}disabled{% endif %}>TTS 음성 적용</button>
           </form>
         </div>
       </div>
@@ -344,7 +325,7 @@
                 <div class="d-flex align-items-start">
                   <div class="me-2">🤖</div>
                   <div>
-                    <div class="message-content bg-white p-3 rounded shadow-sm">
+                    <div class="message-content bg-white p-3 rounded shadow-sm" style="color: #212529 !important;">
                       안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요?
                     </div>
                     <small class="text-muted">시스템</small>
@@ -362,7 +343,151 @@
             <div class="mt-2">
               <small class="text-muted">💡 팁: "파일 편집 도와줘", "코드 작성 도와줘" 등으로 질문하세요.</small>
             </div>
+            
+            <!-- 학습 기능 버튼 -->
+            <div class="mt-3">
+              <button class="btn btn-info btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#learnPanel" aria-expanded="false">
+                📚 챗봇 학습하기
+              </button>
+              <button class="btn btn-secondary btn-sm" type="button" onclick="showLearningStats()">
+                📊 학습 통계
+              </button>
+            </div>
+            
+            <!-- 학습 패널 -->
+            <div class="collapse mt-3" id="learnPanel">
+              <div class="card" style="background-color: rgba(255, 255, 255, 0.95);">
+                <div class="card-header" style="background-color: #f8f9fa; border-bottom: 2px solid #dee2e6;">
+                  <h5 class="mb-0" style="color: #212529 !important;">챗봇 학습</h5>
+                </div>
+                <div class="card-body" style="color: #212529 !important;">
+                  <ul class="nav nav-tabs mb-3" role="tablist">
+                    <li class="nav-item">
+                      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#qa-learn" type="button" style="color: #212529;">Q&A 학습</button>
+                    </li>
+                    <li class="nav-item">
+                      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#example-learn" type="button" style="color: #212529;">예제 학습</button>
+                    </li>
+                    <li class="nav-item">
+                      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#feedback-learn" type="button" style="color: #212529;">피드백</button>
+                    </li>
+                  </ul>
+                  
+                  <div class="tab-content">
+                    <!-- Q&A 학습 탭 -->
+                    <div class="tab-pane fade show active" id="qa-learn">
+                      <div class="mb-3">
+                        <label for="learn-question" class="form-label" style="color: #212529 !important;">질문</label>
+                        <input type="text" class="form-control" id="learn-question" placeholder="예: Flask 라우트 만드는 방법?" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
+                      </div>
+                      <div class="mb-3">
+                        <label for="learn-answer" class="form-label" style="color: #212529 !important;">답변</label>
+                        <textarea class="form-control" id="learn-answer" rows="5" placeholder="답변을 입력하세요. 코드 예시를 포함하면 더 좋습니다." style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
+                      </div>
+                      <button class="btn btn-success" onclick="learnQA()">Q&A 학습 저장</button>
+                      <div id="learn-qa-result" class="mt-2"></div>
+                    </div>
+                    
+                    <!-- 예제 학습 탭 -->
+                    <div class="tab-pane fade" id="example-learn">
+                      <div class="mb-3">
+                        <label for="learn-user" class="form-label" style="color: #212529 !important;">사용자 메시지</label>
+                        <input type="text" class="form-control" id="learn-user" placeholder="예: Python으로 파일 읽는 코드 작성해줘" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
+                      </div>
+                      <div class="mb-3">
+                        <label for="learn-assistant" class="form-label" style="color: #212529 !important;">조수 응답</label>
+                        <textarea class="form-control" id="learn-assistant" rows="5" placeholder="조수의 응답을 입력하세요." style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
+                      </div>
+                      <button class="btn btn-success" onclick="learnExample()">예제 학습 저장</button>
+                      <div id="learn-example-result" class="mt-2"></div>
+                    </div>
+                    
+                    <!-- 피드백 탭 -->
+                    <div class="tab-pane fade" id="feedback-learn">
+                      <div class="mb-3">
+                        <label for="feedback-user" class="form-label" style="color: #212529 !important;">사용자 메시지</label>
+                        <input type="text" class="form-control" id="feedback-user" placeholder="사용자가 물어본 내용" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
+                      </div>
+                      <div class="mb-3">
+                        <label for="feedback-assistant" class="form-label" style="color: #212529 !important;">조수 응답</label>
+                        <textarea class="form-control" id="feedback-assistant" rows="3" placeholder="조수가 답한 내용" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
+                      </div>
+                      <div class="mb-3">
+                        <label class="form-label" style="color: #212529 !important;">피드백</label>
+                        <select class="form-select" id="feedback-type" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
+                          <option value="good">좋음</option>
+                          <option value="bad">나쁨</option>
+                          <option value="improve">개선 필요</option>
+                        </select>
+                      </div>
+                      <div class="mb-3">
+                        <label for="feedback-improvement" class="form-label" style="color: #212529 !important;">개선 제안 (선택사항)</label>
+                        <textarea class="form-control" id="feedback-improvement" rows="3" placeholder="더 나은 답변을 제안해주세요" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
+                      </div>
+                      <button class="btn btn-success" onclick="submitFeedback()">피드백 제출</button>
+                      <div id="feedback-result" class="mt-2"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
+        </div>
+      </div>
+
+      <!-- AI TTS 탭 -->
+      <div class="tab-pane fade" id="tts" role="tabpanel">
+        <h2 class="mt-1 mb-3">🔊 AI Text-to-Speech</h2>
+        <div class="card mb-4">
+          <div class="card-header">
+            <h5 class="mb-0">텍스트를 음성으로 변환</h5>
+          </div>
+          <div class="card-body">
+            <form action="/tts" method="post">
+              <div class="mb-3">
+                <label for="tts-text" class="form-label">텍스트 입력</label>
+                <textarea class="form-control" id="tts-text" name="text" rows="5" placeholder="음성으로 변환할 텍스트를 입력하세요. (한국어/영어 모두 지원)" required></textarea>
+                <small class="form-text text-muted">
+                  긴 텍스트는 자동으로 문장 단위로 분할하여 처리됩니다. 영어 모델은 약 400단어까지 권장하며, 그 이상은 자동 분할됩니다.
+                </small>
+              </div>
+              <div class="mb-3">
+                <label for="tts-language" class="form-label">언어 선택</label>
+                <select class="form-select" id="tts-language" name="language">
+                  <option value="auto" selected>자동 감지 (권장)</option>
+                  <option value="ko">한국어</option>
+                  <option value="en">영어</option>
+                </select>
+                <small class="form-text text-muted">
+                  한국어는 gTTS를 사용하며, 영어는 Bark 모델을 사용합니다. 자동 감지 시 텍스트를 분석하여 적절한 모델을 선택합니다.
+                </small>
+              </div>
+              <button type="submit" class="btn btn-primary w-100">음성 생성</button>
+            </form>
+          </div>
+        </div>
+        
+        <h2 class="mt-5">생성된 음성 파일</h2>
+        <div class="list-group">
+          {% for file in tts_files %}
+            <div class="list-group-item">
+              <div class="d-flex justify-content-between align-items-center">
+                <div style="flex: 1;">
+                  <strong>{{ file }}</strong>
+                  <audio controls class="mt-2" style="width: 100%;">
+                    {% if file.endswith('.mp3') %}
+                      <source src="{{ url_for('download_file', filename=file) }}" type="audio/mpeg">
+                    {% else %}
+                      <source src="{{ url_for('download_file', filename=file) }}" type="audio/wav">
+                    {% endif %}
+                  </audio>
+                </div>
+                <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-sm btn-primary ms-3">다운로드</a>
+              </div>
+            </div>
+          {% else %}
+            <div class="list-group-item text-muted">생성된 음성 파일이 없습니다.</div>
+          {% endfor %}
         </div>
       </div>
     </div>
@@ -372,7 +497,6 @@
       <div class="quick-actions" id="quickActions">
         <button class="quick-action-btn" onclick="scrollToSection('download')">⬇️ Download</button>
         <button class="quick-action-btn" onclick="scrollToSection('tools')">🎬 Video Tools</button>
-        <button class="quick-action-btn" onclick="scrollToSection('musicgen')">🎵 MusicGen</button>
         <button class="quick-action-btn" onclick="scrollToSection('survey')">🤖 AI Survey</button>
       </div>
       <button class="fab-button" id="fabMenu" onclick="toggleQuickActions()">☰</button>
@@ -654,11 +778,16 @@
         }
       });
 
-      // Tab change animation
+      // Tab change animation - 스크롤을 맨 위로
       const tabButtons = document.querySelectorAll('[data-bs-toggle="tab"]');
       tabButtons.forEach(button => {
         button.addEventListener('shown.bs.tab', function (event) {
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          // 탭 전환 시 즉시 맨 위로 스크롤
+          window.scrollTo({ top: 0, behavior: 'instant' });
+          // 약간의 지연 후 부드럽게 다시 확인 (레이아웃 변경 대응)
+          setTimeout(() => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }, 50);
         });
       });
 
@@ -744,7 +873,7 @@
             <div class="d-flex align-items-start">
               <div class="me-2">🤖</div>
               <div>
-                <div class="message-content bg-white p-3 rounded shadow-sm" style="max-width: 70%;">
+                <div class="message-content bg-white p-3 rounded shadow-sm" style="max-width: 70%; color: #212529 !important;">
                   ${isLoading ? '<span class="spinner-border spinner-border-sm me-2"></span>' : ''}${escapeHtml(message)}
                 </div>
                 <small class="text-muted">시스템</small>
@@ -763,6 +892,126 @@
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+      }
+
+      // Q&A 학습 함수
+      async function learnQA() {
+        const question = document.getElementById('learn-question').value.trim();
+        const answer = document.getElementById('learn-answer').value.trim();
+        const resultDiv = document.getElementById('learn-qa-result');
+        
+        if (!question || !answer) {
+          resultDiv.innerHTML = '<div class="alert alert-danger">질문과 답변을 모두 입력해주세요.</div>';
+          return;
+        }
+        
+        try {
+          const response = await fetch('/chatbot/learn/qa', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({question: question, answer: answer})
+          });
+          
+          const data = await response.json();
+          if (data.success) {
+            resultDiv.innerHTML = `<div class="alert alert-success">✅ 학습 완료! 총 ${data.total_qa}개의 Q&A가 저장되었습니다.</div>`;
+            document.getElementById('learn-question').value = '';
+            document.getElementById('learn-answer').value = '';
+          } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">오류: ${data.error}</div>`;
+          }
+        } catch (error) {
+          resultDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${error.message}</div>`;
+        }
+      }
+
+      // 예제 학습 함수
+      async function learnExample() {
+        const user = document.getElementById('learn-user').value.trim();
+        const assistant = document.getElementById('learn-assistant').value.trim();
+        const resultDiv = document.getElementById('learn-example-result');
+        
+        if (!user || !assistant) {
+          resultDiv.innerHTML = '<div class="alert alert-danger">사용자 메시지와 조수 응답을 모두 입력해주세요.</div>';
+          return;
+        }
+        
+        try {
+          const response = await fetch('/chatbot/learn/example', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({user: user, assistant: assistant})
+          });
+          
+          const data = await response.json();
+          if (data.success) {
+            resultDiv.innerHTML = `<div class="alert alert-success">✅ 학습 완료! 총 ${data.total_examples}개의 예제가 저장되었습니다.</div>`;
+            document.getElementById('learn-user').value = '';
+            document.getElementById('learn-assistant').value = '';
+          } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">오류: ${data.error}</div>`;
+          }
+        } catch (error) {
+          resultDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${error.message}</div>`;
+        }
+      }
+
+      // 피드백 제출 함수
+      async function submitFeedback() {
+        const userMessage = document.getElementById('feedback-user').value.trim();
+        const assistantResponse = document.getElementById('feedback-assistant').value.trim();
+        const feedback = document.getElementById('feedback-type').value;
+        const improvement = document.getElementById('feedback-improvement').value.trim();
+        const resultDiv = document.getElementById('feedback-result');
+        
+        if (!userMessage || !assistantResponse) {
+          resultDiv.innerHTML = '<div class="alert alert-danger">사용자 메시지와 조수 응답을 모두 입력해주세요.</div>';
+          return;
+        }
+        
+        try {
+          const response = await fetch('/chatbot/learn/feedback', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              user_message: userMessage,
+              assistant_response: assistantResponse,
+              feedback: feedback,
+              improvement: improvement
+            })
+          });
+          
+          const data = await response.json();
+          if (data.success) {
+            resultDiv.innerHTML = '<div class="alert alert-success">✅ 피드백이 저장되었습니다. 감사합니다!</div>';
+            document.getElementById('feedback-user').value = '';
+            document.getElementById('feedback-assistant').value = '';
+            document.getElementById('feedback-improvement').value = '';
+          } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">오류: ${data.error}</div>`;
+          }
+        } catch (error) {
+          resultDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${error.message}</div>`;
+        }
+      }
+
+      // 학습 통계 표시 함수
+      async function showLearningStats() {
+        try {
+          const response = await fetch('/chatbot/learn/stats');
+          const data = await response.json();
+          
+          if (data.success) {
+            const message = `📊 학습 통계\n\n` +
+              `Q&A 쌍: ${data.knowledge_base.qa_pairs}개\n` +
+              `예제 대화: ${data.knowledge_base.examples}개\n` +
+              `대화 기록: ${data.learning_data.conversations}개\n` +
+              `피드백: ${data.learning_data.feedback}개`;
+            alert(message);
+          }
+        } catch (error) {
+          alert('통계를 불러오는 중 오류가 발생했습니다: ' + error.message);
+        }
       }
     </script>
   </body>

@@ -15,4 +15,5 @@ lxml
 openai
 webdriver-manager
 sentencepiece
-accelerate 
+accelerate
+gtts 

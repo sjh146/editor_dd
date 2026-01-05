@@ -522,6 +522,62 @@ audio {
   color: #ff9999 !important;
 }
 
+/* 학습 패널 스타일 */
+#learnPanel .card {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  color: #212529 !important;
+}
+
+#learnPanel .card-header {
+  background-color: #f8f9fa !important;
+  border-bottom: 2px solid #dee2e6 !important;
+}
+
+#learnPanel .card-header h5 {
+  color: #212529 !important;
+}
+
+#learnPanel .card-body {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  color: #212529 !important;
+}
+
+#learnPanel .form-label {
+  color: #212529 !important;
+}
+
+#learnPanel .form-control,
+#learnPanel .form-select {
+  background-color: #ffffff !important;
+  color: #212529 !important;
+  border: 1px solid #dee2e6 !important;
+}
+
+#learnPanel .form-control:focus,
+#learnPanel .form-select:focus {
+  background-color: #ffffff !important;
+  color: #212529 !important;
+  border-color: #667eea !important;
+  box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25) !important;
+}
+
+#learnPanel .form-control::placeholder {
+  color: #6c757d !important;
+}
+
+#learnPanel .nav-link {
+  color: #212529 !important;
+}
+
+#learnPanel .nav-link.active {
+  color: #667eea !important;
+  background-color: rgba(102, 126, 234, 0.1) !important;
+}
+
+#learnPanel .nav-link:hover {
+  color: #667eea !important;
+}
+
 /* Grid Layout */
 .row {
   margin: 0 -0.75rem;
@@ -838,5 +894,44 @@ audio {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--dark-panel-light);
+}
+
+/* 챗봇 메시지 스타일 */
+#chatbot-messages {
+  background-color: #f8f9fa !important;
+}
+
+.message-content {
+  word-wrap: break-word;
+  line-height: 1.6;
+}
+
+.message-content.bg-white {
+  color: #212529 !important;
+  background-color: #ffffff !important;
+}
+
+.message-content.bg-primary {
+  color: #ffffff !important;
+  background-color: #667eea !important;
+}
+
+/* modern-panel 안에서도 챗봇 메시지는 명확하게 보이도록 */
+.modern-panel .message-content.bg-white {
+  color: #212529 !important;
+  background-color: #ffffff !important;
+}
+
+.modern-panel .message-content.bg-primary {
+  color: #ffffff !important;
+  background-color: #667eea !important;
+}
+
+.modern-panel #chatbot-messages {
+  background-color: #f8f9fa !important;
+}
+
+.modern-panel #chatbot-messages .text-muted {
+  color: #6c757d !important;
 }
 
