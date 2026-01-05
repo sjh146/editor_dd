@@ -10,6 +10,7 @@ from werkzeug.utils import secure_filename
 
 # MusicGen & audio processing imports
 from transformers import MusicgenForConditionalGeneration, MusicgenProcessor
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import torchaudio
 import librosa
@@ -48,6 +49,85 @@ def load_musicgen() -> tuple[MusicgenProcessor, MusicgenForConditionalGeneration
         musicgen_processor = cast(MusicgenProcessor, MusicgenProcessor.from_pretrained("facebook/musicgen-small"))
         musicgen_model = cast(MusicgenForConditionalGeneration, MusicgenForConditionalGeneration.from_pretrained("facebook/musicgen-small"))
     return musicgen_processor, musicgen_model
+
+# 챗봇 모델 로딩 (최초 1회만)
+chatbot_tokenizer = None
+chatbot_model = None
+
+def load_chatbot_model():
+    """한국어 챗봇 모델 로딩"""
+    global chatbot_tokenizer, chatbot_model
+    if chatbot_tokenizer is None or chatbot_model is None:
+        # 한국어 지원 모델 사용 (실제로 존재하는 모델들)
+        # 우선순위: 작은 모델부터 시도 (빠른 로딩, 적은 메모리)
+        model_candidates = [
+            "skt/kogpt2-base-v2",  # SKT의 KoGPT2 (작고 빠름, 한국어 지원)
+            "gpt2",  # 기본 GPT2 (영어지만 작고 안정적, 폴백용)
+        ]
+        
+        for model_name in model_candidates:
+            print(f"챗봇 모델 로딩 시도: {model_name}...")
+            try:
+                chatbot_tokenizer = AutoTokenizer.from_pretrained(model_name)
+                
+                # GPU/CPU 설정 - GPU가 있으면 무조건 GPU 사용
+                use_cuda = torch.cuda.is_available()
+                if use_cuda:
+                    # GPU 사용 시 - 무조건 GPU 모드
+                    print(f"GPU 감지됨: {torch.cuda.get_device_name(0)}")
+                    try:
+                        # accelerate가 있으면 최적화 옵션 사용
+                        chatbot_model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            low_cpu_mem_usage=True
+                        )
+                        # device_map="auto"를 사용하면 자동으로 GPU에 할당되지만, 명시적으로 확인
+                        if hasattr(chatbot_model, 'device'):
+                            print(f"모델이 {chatbot_model.device}에 로드됨")
+                        else:
+                            # device_map을 사용했지만 확인을 위해 첫 번째 파라미터의 device 확인
+                            first_param = next(chatbot_model.parameters())
+                            print(f"모델이 {first_param.device}에 로드됨")
+                    except Exception as e:
+                        print(f"accelerate 최적화 실패, 기본 GPU 모드로 전환: {e}")
+                        # accelerate가 없으면 기본 방식으로 GPU에 명시적으로 로드
+                        chatbot_model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
+                            torch_dtype=torch.float16
+                        )
+                        chatbot_model = chatbot_model.to("cuda")
+                        chatbot_model.eval()
+                        print(f"모델이 cuda에 명시적으로 로드됨")
+                else:
+                    # GPU가 없으면 에러 메시지와 함께 CPU 사용
+                    print("경고: GPU를 감지할 수 없습니다. CPU 모드로 작동합니다.")
+                    print("GPU를 사용하려면 CUDA가 설치된 GPU가 필요합니다.")
+                    chatbot_model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        torch_dtype=torch.float32
+                    )
+                    chatbot_model = chatbot_model.to("cpu")
+                    chatbot_model.eval()
+                
+                # 패딩 토큰 설정
+                if chatbot_tokenizer.pad_token is None:
+                    chatbot_tokenizer.pad_token = chatbot_tokenizer.eos_token
+                
+                print(f"챗봇 모델 로딩 완료: {model_name} ({'GPU' if use_cuda else 'CPU'} 모드)")
+                break  # 성공하면 루프 종료
+                
+            except Exception as e:
+                print(f"모델 {model_name} 로딩 실패: {e}")
+                chatbot_tokenizer = None
+                chatbot_model = None
+                continue  # 다음 모델 시도
+        
+        if chatbot_tokenizer is None or chatbot_model is None:
+            print("모든 챗봇 모델 로딩 실패. 규칙 기반 응답만 사용 가능합니다.")
+    
+    return chatbot_tokenizer, chatbot_model
 
 def get_downloaded_files():
     return sorted(os.listdir(app.config['DOWNLOAD_FOLDER']), reverse=True)
@@ -233,8 +313,10 @@ def musicgen():
         duration_seconds = 30
     
     # MusicGen은 대략 5-10초당 256 토큰 정도 생성 가능
-    # 2분(120초)을 위해 약 1500-2000 토큰이 필요
-    # 더 긴 음악을 위해 최대값 설정
+    # 모델의 최대 위치 임베딩을 고려하여 안전한 값으로 제한
+    # MusicGen-small 모델의 경우 일반적으로 2048 토큰이 안전한 최대값
+    MAX_SAFE_TOKENS = 1536  # 안전한 최대 토큰 수 (약 2분)
+    
     if duration_seconds <= 15:
         max_new_tokens = 256
     elif duration_seconds <= 30:
@@ -242,15 +324,43 @@ def musicgen():
     elif duration_seconds <= 60:
         max_new_tokens = 1024
     elif duration_seconds <= 120:
-        max_new_tokens = 2048
+        max_new_tokens = 1536  # 안전한 최대값
     else:
-        max_new_tokens = 3072  # 최대 약 3-4분
+        max_new_tokens = MAX_SAFE_TOKENS  # 최대값 제한
+        flash(f'요청하신 길이({duration_seconds}초)가 너무 깁니다. 최대 {MAX_SAFE_TOKENS} 토큰(약 2분)으로 제한됩니다.', 'warning')
     
     processor, model = load_musicgen()
     # MusicGen inference
     inputs = processor(text=[prompt], padding=True, return_tensors="pt")
-    with torch.no_grad():
-        audio_values = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    
+    # 모델의 최대 위치 임베딩 길이 확인
+    max_position_embeddings = getattr(model.config, 'max_position_embeddings', None)
+    if max_position_embeddings is None:
+        # 기본값 사용 (MusicGen-small의 경우 일반적으로 2048)
+        max_position_embeddings = 2048
+    
+    # 입력 시퀀스 길이 확인 및 제한
+    input_ids = inputs.get('input_ids', None)
+    if input_ids is not None:
+        input_length = input_ids.shape[1]
+        # 입력 길이 + 생성할 토큰 수가 최대값을 초과하지 않도록 조정
+        if input_length + max_new_tokens > max_position_embeddings:
+            max_new_tokens = max(256, max_position_embeddings - input_length - 50)  # 여유 공간 확보
+            flash(f'입력 길이를 고려하여 max_new_tokens를 {max_new_tokens}로 조정했습니다.', 'info')
+    
+    try:
+        with torch.no_grad():
+            audio_values = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    except IndexError as e:
+        # IndexError 발생 시 더 작은 값으로 재시도
+        flash(f'토큰 수가 너무 큽니다. 더 작은 값으로 재시도합니다.', 'warning')
+        max_new_tokens = min(512, max_new_tokens // 2)
+        if input_ids is not None:
+            input_length = input_ids.shape[1]
+            if input_length + max_new_tokens > max_position_embeddings:
+                max_new_tokens = max(256, max_position_embeddings - input_length - 50)
+        with torch.no_grad():
+            audio_values = model.generate(**inputs, max_new_tokens=max_new_tokens)
     # 오디오 저장 (MP3 또는 WAV)
     mp3_filename = f"musicgen_{prompt.replace(' ', '_')}.mp3"
     mp3_path = os.path.join(DOWNLOAD_FOLDER, mp3_filename)
@@ -482,6 +592,150 @@ def fill_survey():
         return jsonify({
             'error': f'오류 발생: {error_msg}',
             'type': type(e).__name__
+        }), 500
+
+def get_chatbot_response(user_message: str, conversation_history: list = None) -> str:
+    """로컬 Transformer 모델을 사용한 챗봇 응답 생성"""
+    if conversation_history is None:
+        conversation_history = []
+    
+    # 시스템 프롬프트: 편집 작업을 도와주는 조수 역할
+    system_prompt = """당신은 편집 작업을 도와주는 친절한 한국어 조수입니다. 
+사용자가 코드 작성, 파일 편집, 문제 해결 등을 도와달라고 요청하면 도움을 제공하세요.
+항상 한국어로 친절하고 명확하게 답변하세요."""
+    
+    try:
+        # 로컬 Transformer 모델 로딩
+        tokenizer, model = load_chatbot_model()
+        
+        if tokenizer is None or model is None:
+            return "죄송합니다. 챗봇 모델을 로드할 수 없습니다. 모델 다운로드 중 오류가 발생했을 수 있습니다."
+        
+        # 대화 히스토리와 현재 메시지를 프롬프트로 구성
+        # KoGPT2는 일반 텍스트 생성 모델이므로 간단한 형식 사용
+        prompt_parts = []
+        
+        # 시스템 프롬프트 (간단하게)
+        prompt_parts.append(f"편집 조수: {system_prompt}\n")
+        
+        # 최근 대화 히스토리 추가 (최대 3개, 너무 길면 메모리 부족)
+        for msg in conversation_history[-3:]:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            if role == 'user':
+                prompt_parts.append(f"사용자: {content}\n")
+            elif role == 'assistant':
+                prompt_parts.append(f"조수: {content}\n")
+        
+        # 현재 사용자 메시지 추가
+        prompt_parts.append(f"사용자: {user_message}\n조수:")
+        
+        full_prompt = "".join(prompt_parts)
+        
+        # 토큰화
+        inputs = tokenizer(
+            full_prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=True
+        )
+        
+        # GPU/CPU 설정 - GPU가 있으면 무조건 GPU 사용
+        use_cuda = torch.cuda.is_available()
+        if use_cuda:
+            device = "cuda"
+            # 모델이 이미 GPU에 있는지 확인하고, 없으면 이동
+            if not next(model.parameters()).is_cuda:
+                model = model.to(device)
+        else:
+            device = "cpu"
+            # GPU가 없으면 CPU 사용
+            if not next(model.parameters()).is_cpu:
+                model = model.to(device)
+        
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        # 생성
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.2
+            )
+        
+        # 디코딩
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # 조수 응답 부분만 추출
+        if "조수:" in generated_text:
+            # 마지막 "조수:" 이후의 텍스트 추출
+            response = generated_text.split("조수:")[-1].strip()
+            # 다음 "사용자:" 또는 줄바꿈 전까지
+            if "\n사용자:" in response:
+                response = response.split("\n사용자:")[0].strip()
+            if "\n" in response:
+                # 첫 번째 문장만 사용 (더 자연스러운 응답)
+                response = response.split("\n")[0].strip()
+        else:
+            # 프롬프트 제거
+            response = generated_text[len(full_prompt):].strip()
+            # 줄바꿈이나 특수 문자 제거
+            if "\n" in response:
+                response = response.split("\n")[0].strip()
+        
+        # 빈 응답 처리
+        if not response or len(response) < 3:
+            response = "죄송합니다. 적절한 응답을 생성하지 못했습니다. 다시 질문해주세요."
+        
+        # 응답 정리 (너무 길면 자르기)
+        if len(response) > 500:
+            response = response[:500] + "..."
+        
+        return response
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"챗봇 응답 생성 오류: {error_msg}")
+        # 폴백: 규칙 기반 응답
+        user_lower = user_message.lower()
+        
+        if any(word in user_lower for word in ['안녕', 'hello', 'hi', '하이']):
+            return "안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요? (모델 오류로 간단한 응답만 가능합니다)"
+        elif any(word in user_lower for word in ['파일', 'file', '코드', 'code']):
+            return "파일이나 코드 작업을 도와드릴 수 있습니다. 구체적으로 어떤 작업이 필요하신가요?"
+        elif any(word in user_lower for word in ['도움', 'help', '도와']):
+            return "다음과 같은 작업을 도와드릴 수 있습니다:\n- 코드 작성 및 수정\n- 파일 편집\n- 문제 해결\n- 문법 및 스타일 개선\n\n구체적으로 무엇을 도와드릴까요?"
+        elif any(word in user_lower for word in ['감사', '고마', 'thanks', 'thank']):
+            return "천만에요! 다른 도움이 필요하시면 언제든지 말씀해주세요."
+        else:
+            return f"죄송합니다. 모델 처리 중 오류가 발생했습니다: {error_msg[:100]}. 다시 시도해주세요."
+
+@app.route('/chatbot', methods=['POST'])
+def chatbot():
+    """챗봇 API 엔드포인트"""
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        user_message = data.get('message', '').strip()
+        conversation_history = data.get('history', [])
+        
+        if not user_message:
+            return jsonify({'error': '메시지를 입력해주세요.'}), 400
+        
+        response = get_chatbot_response(user_message, conversation_history)
+        
+        return jsonify({
+            'success': True,
+            'response': response
+        })
+    except Exception as e:
+        return jsonify({
+            'error': f'오류 발생: {str(e)}'
         }), 500
 
 if __name__ == '__main__':

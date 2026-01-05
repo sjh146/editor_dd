@@ -35,6 +35,11 @@
               <span class="section-icon">🤖</span> AI Survey
             </button>
           </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="chatbot-tab" data-bs-toggle="tab" data-bs-target="#chatbot" type="button" role="tab">
+              <span class="section-icon">💬</span> 편집 조수
+            </button>
+          </li>
         </ul>
       </div>
 
@@ -323,6 +328,41 @@
           </div>
         </div>
       </div>
+        </div>
+      </div>
+
+      <!-- 챗봇 탭 -->
+      <div class="tab-pane fade" id="chatbot" role="tabpanel">
+        <h2 class="mt-3">💬 편집 조수 챗봇</h2>
+        <div class="card my-4 modern-panel">
+          <div class="card-body">
+            <p class="text-muted">편집 작업을 도와주는 한국어 챗봇입니다. 코드 작성, 파일 편집, 문제 해결 등을 도와드립니다.</p>
+            
+            <!-- 챗봇 메시지 영역 -->
+            <div id="chatbot-messages" style="height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin-bottom: 15px; background-color: #f8f9fa;">
+              <div class="message bot-message mb-3">
+                <div class="d-flex align-items-start">
+                  <div class="me-2">🤖</div>
+                  <div>
+                    <div class="message-content bg-white p-3 rounded shadow-sm">
+                      안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요?
+                    </div>
+                    <small class="text-muted">시스템</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- 입력 영역 -->
+            <div class="input-group">
+              <input type="text" class="form-control" id="chatbot-input" placeholder="메시지를 입력하세요..." onkeypress="if(event.key === 'Enter') sendChatbotMessage()">
+              <button class="btn btn-primary" type="button" onclick="sendChatbotMessage()">전송</button>
+            </div>
+            
+            <div class="mt-2">
+              <small class="text-muted">💡 팁: "파일 편집 도와줘", "코드 작성 도와줘" 등으로 질문하세요.</small>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -621,6 +661,109 @@
           window.scrollTo({ top: 0, behavior: 'smooth' });
         });
       });
+
+      // 챗봇 기능
+      let chatbotHistory = [];
+
+      function sendChatbotMessage() {
+        const input = document.getElementById('chatbot-input');
+        const message = input.value.trim();
+        
+        if (!message) return;
+        
+        // 사용자 메시지 표시
+        addChatbotMessage(message, 'user');
+        input.value = '';
+        
+        // 로딩 표시
+        const loadingId = addChatbotMessage('처리 중...', 'bot', true);
+        
+        // API 호출
+        fetch('/chatbot', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: message,
+            history: chatbotHistory
+          })
+        })
+        .then(response => response.json())
+        .then(data => {
+          // 로딩 메시지 제거
+          const loadingElement = document.getElementById(loadingId);
+          if (loadingElement) {
+            loadingElement.remove();
+          }
+          
+          if (data.success) {
+            addChatbotMessage(data.response, 'bot');
+            // 히스토리 업데이트
+            chatbotHistory.push({role: 'user', content: message});
+            chatbotHistory.push({role: 'assistant', content: data.response});
+            // 최근 20개만 유지
+            if (chatbotHistory.length > 20) {
+              chatbotHistory = chatbotHistory.slice(-20);
+            }
+          } else {
+            addChatbotMessage('오류: ' + (data.error || '알 수 없는 오류'), 'bot');
+          }
+        })
+        .catch(error => {
+          const loadingElement = document.getElementById(loadingId);
+          if (loadingElement) {
+            loadingElement.remove();
+          }
+          addChatbotMessage('오류 발생: ' + error.message, 'bot');
+        });
+      }
+
+      function addChatbotMessage(message, sender, isLoading = false) {
+        const messagesDiv = document.getElementById('chatbot-messages');
+        const messageId = 'msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        
+        const messageDiv = document.createElement('div');
+        messageDiv.id = messageId;
+        messageDiv.className = `message ${sender}-message mb-3`;
+        
+        if (sender === 'user') {
+          messageDiv.innerHTML = `
+            <div class="d-flex align-items-start justify-content-end">
+              <div>
+                <div class="message-content bg-primary text-white p-3 rounded shadow-sm" style="max-width: 70%; margin-left: auto;">
+                  ${escapeHtml(message)}
+                </div>
+                <small class="text-muted d-block text-end">나</small>
+              </div>
+              <div class="ms-2">👤</div>
+            </div>
+          `;
+        } else {
+          messageDiv.innerHTML = `
+            <div class="d-flex align-items-start">
+              <div class="me-2">🤖</div>
+              <div>
+                <div class="message-content bg-white p-3 rounded shadow-sm" style="max-width: 70%;">
+                  ${isLoading ? '<span class="spinner-border spinner-border-sm me-2"></span>' : ''}${escapeHtml(message)}
+                </div>
+                <small class="text-muted">시스템</small>
+              </div>
+            </div>
+          `;
+        }
+        
+        messagesDiv.appendChild(messageDiv);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        
+        return messageId;
+      }
+
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
     </script>
   </body>
 </html> 

@@ -41,6 +41,7 @@ class SurveyTransformer:
         self.classifier = None
         self.api_client = None
         self.api_provider = api_provider  # 'openai' or 'deepseek'
+        self.api_error_occurred = False  # API 오류 발생 플래그
         self._load_model()
         self._init_api_client(api_key)
     
@@ -85,7 +86,7 @@ class SurveyTransformer:
     
     def _is_question_with_api(self, text: str) -> bool:
         """API를 사용하여 질문인지 판단"""
-        if not self.api_client:
+        if not self.api_client or self.api_error_occurred:
             return None
         
         try:
@@ -108,15 +109,28 @@ class SurveyTransformer:
             answer = response.choices[0].message.content.strip().lower()
             return 'yes' in answer or '예' in answer
         except Exception as e:
-            print(f"API를 사용한 질문 판단 중 오류 발생: {e}")
+            # API 오류가 발생하면 플래그 설정하고 더 이상 API 사용 안 함
+            if not self.api_error_occurred:
+                error_msg = str(e)
+                if '401' in error_msg or 'invalid_api_key' in error_msg or 'Incorrect API key' in error_msg:
+                    print(f"⚠️ API 키 오류가 발생했습니다. API 기능을 비활성화하고 기본 로직을 사용합니다.")
+                else:
+                    print(f"⚠️ API 오류 발생: {error_msg[:100]}. API 기능을 비활성화하고 기본 로직을 사용합니다.")
+                self.api_error_occurred = True
             return None
     
     def understand_question(self, question_text: str, options: list) -> int:
-        """질문을 이해하고 답변 인덱스 반환"""
+        """질문을 이해하고 답변 인덱스 반환 (DeepSeek API 활용)"""
         if not question_text or not options:
             return random.randint(0, len(options) - 1) if options else 0
         
-        # O, X 기호 기반 판단 (먼저 처리)
+        # DeepSeek API가 있으면 먼저 시도
+        if self.api_client and self.api_provider == 'deepseek':
+            ai_result = self._analyze_question_with_deepseek(question_text, options)
+            if ai_result is not None:
+                return ai_result
+        
+        # O, X 기호 기반 판단 (fallback)
         o_x_result = self._interpret_o_x_symbols(options)
         if o_x_result is not None:
             return o_x_result
@@ -125,7 +139,7 @@ class SurveyTransformer:
         if self._has_unreadable_content(question_text, options):
             return random.randint(0, len(options) - 1)
         
-        # 키워드 기반 판단
+        # 키워드 기반 판단 (fallback)
         question_lower = question_text.lower()
         positive_keywords = ['만족', '좋', '긍정', '동의', '예', 'yes', '좋다', '좋아', 'satisfied', 'good', 'positive', '추천']
         negative_keywords = ['불만', '나쁜', '부정', '비동의', '아니요', 'no', '나쁘다', 'disappointed', 'bad', 'negative']
@@ -136,6 +150,125 @@ class SurveyTransformer:
             return 0
         else:
             return random.randint(0, len(options) - 1)
+    
+    def _determine_question_type_with_deepseek(self, question_text: str, options: list = None, inputs: list = None) -> str:
+        """DeepSeek API를 사용하여 질문 타입 판단"""
+        if not self.api_client or self.api_provider != 'deepseek' or self.api_error_occurred:
+            return None
+        
+        try:
+            options_text = ""
+            if options:
+                options_text = "\n".join([f"- {opt.get('label', '옵션') if isinstance(opt, dict) else str(opt)}" 
+                                         for opt in options])
+            
+            inputs_text = ""
+            if inputs:
+                inputs_text = "\n".join([f"- {inp.get('type', 'text')}: {inp.get('label', '입력란')}" 
+                                        for inp in inputs])
+            
+            prompt = f"""다음 설문조사 질문을 분석하여 질문 타입을 판단하세요.
+
+질문: {question_text}
+{f'선택지: {options_text}' if options_text else ''}
+{f'입력란: {inputs_text}' if inputs_text else ''}
+
+질문 타입을 다음 중 하나로 판단하세요:
+1. "객관식_라디오" - 라디오 버튼으로 하나만 선택하는 객관식 질문
+2. "객관식_체크박스" - 체크박스로 여러 개 선택하는 객관식 질문
+3. "주관식_텍스트" - 텍스트 입력란에 자유롭게 입력하는 주관식 질문
+4. "주관식_숫자" - 숫자만 입력하는 주관식 질문
+5. "주관식_이메일" - 이메일 주소를 입력하는 주관식 질문
+6. "주관식_전화번호" - 전화번호를 입력하는 주관식 질문
+7. "주관식_날짜" - 날짜를 입력하는 주관식 질문
+8. "버튼" - 버튼을 클릭하는 질문
+
+답변은 타입만 제공하세요. 예: 객관식_라디오"""
+
+            response = self.api_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "당신은 설문조사의 질문 타입을 판단하는 전문가입니다. 질문과 선택지/입력란을 분석하여 정확한 타입을 판단하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=20,
+                temperature=0.1
+            )
+            
+            answer_text = response.choices[0].message.content.strip()
+            print(f"    DeepSeek 타입 판단 결과: {answer_text}")
+            return answer_text
+        except Exception as e:
+            # API 오류가 발생하면 플래그 설정하고 더 이상 API 사용 안 함
+            if not self.api_error_occurred:
+                error_msg = str(e)
+                if '401' in error_msg or 'invalid_api_key' in error_msg or 'Incorrect API key' in error_msg:
+                    print(f"    ⚠️ API 키 오류가 발생했습니다. API 기능을 비활성화하고 기본 로직을 사용합니다.")
+                else:
+                    print(f"    ⚠️ DeepSeek 타입 판단 오류: {error_msg[:100]}")
+                self.api_error_occurred = True
+            return None
+    
+    def _analyze_question_with_deepseek(self, question_text: str, options: list) -> int:
+        """DeepSeek API를 사용하여 질문과 옵션을 분석하고 적절한 답변 선택"""
+        if not self.api_client or not options or self.api_error_occurred:
+            return None
+        
+        try:
+            # 옵션 리스트 생성
+            options_text = "\n".join([f"{idx + 1}. {opt.get('label', '옵션') if isinstance(opt, dict) else str(opt)}" 
+                                     for idx, opt in enumerate(options)])
+            
+            prompt = f"""다음 설문조사 질문과 선택지를 분석하여 가장 적절한 답변을 선택하세요.
+
+질문: {question_text}
+
+선택지:
+{options_text}
+
+지시사항:
+1. 질문의 의도를 정확히 파악하세요.
+2. 각 선택지의 의미를 이해하세요.
+3. 일반적으로 긍정적이고 적절한 답변을 선택하세요.
+4. 만족도 조사인 경우 보통 중간 이상의 긍정적인 답변을 선택하세요.
+5. O/X 질문인 경우 O(긍정)를 선택하세요.
+6. 숫자나 등급이 있는 경우 중간 이상의 값을 선택하세요.
+
+답변은 반드시 선택지 번호(1부터 시작)만 숫자로 답변하세요. 예: 1, 2, 3 등"""
+
+            response = self.api_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "당신은 설문조사에 답변하는 전문가입니다. 질문을 분석하고 가장 적절한 선택지를 번호로만 답변하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=10,
+                temperature=0.3
+            )
+            
+            answer_text = response.choices[0].message.content.strip()
+            print(f"    DeepSeek 분석 결과: {answer_text}")
+            
+            # 숫자 추출
+            import re
+            numbers = re.findall(r'\d+', answer_text)
+            if numbers:
+                answer_idx = int(numbers[0]) - 1  # 1-based to 0-based
+                if 0 <= answer_idx < len(options):
+                    print(f"    ✓ DeepSeek 선택: {answer_idx + 1}번 옵션 ({options[answer_idx].get('label', '옵션') if isinstance(options[answer_idx], dict) else str(options[answer_idx])})")
+                    return answer_idx
+            
+            return None
+        except Exception as e:
+            # API 오류가 발생하면 플래그 설정하고 더 이상 API 사용 안 함
+            if not self.api_error_occurred:
+                error_msg = str(e)
+                if '401' in error_msg or 'invalid_api_key' in error_msg or 'Incorrect API key' in error_msg:
+                    print(f"    ⚠️ API 키 오류가 발생했습니다. API 기능을 비활성화하고 기본 로직을 사용합니다.")
+                else:
+                    print(f"    ⚠️ DeepSeek 분석 오류: {error_msg[:100]}")
+                self.api_error_occurred = True
+            return None
     
     def _interpret_o_x_symbols(self, options: list) -> int:
         """O, X 기호 해석"""
@@ -265,7 +398,7 @@ class SurveyTransformer:
     
     def _generate_text_with_api(self, question_text: str, input_type: str = 'text') -> str:
         """API를 사용하여 텍스트 답변 생성 (입력 타입 고려)"""
-        if not self.api_client:
+        if not self.api_client or self.api_error_occurred:
             return None
         
         try:
@@ -318,7 +451,14 @@ class SurveyTransformer:
             
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"API를 사용한 텍스트 생성 중 오류 발생: {e}")
+            # API 오류가 발생하면 플래그 설정하고 더 이상 API 사용 안 함
+            if not self.api_error_occurred:
+                error_msg = str(e)
+                if '401' in error_msg or 'invalid_api_key' in error_msg or 'Incorrect API key' in error_msg:
+                    print(f"    ⚠️ API 키 오류가 발생했습니다. API 기능을 비활성화하고 기본 로직을 사용합니다.")
+                else:
+                    print(f"    ⚠️ API 텍스트 생성 오류: {error_msg[:100]}")
+                self.api_error_occurred = True
             return None
 
 
@@ -396,6 +536,88 @@ class SurveyAutoFill:
             pass
         return None
     
+    def _analyze_page_structure_with_deepseek(self, question_texts: list, radio_groups: dict, checkbox_groups: dict, text_inputs: list) -> dict:
+        """DeepSeek API를 사용하여 페이지 구조 분석 (질문 타입 판단)"""
+        if not self.transformer.api_client or self.transformer.api_provider != 'deepseek' or self.transformer.api_error_occurred:
+            return None
+        
+        try:
+            # 질문 텍스트와 발견된 요소들을 정리
+            questions_info = []
+            for q_text in question_texts[:10]:  # 최대 10개 질문만
+                questions_info.append(f"- {q_text[:100]}")
+            
+            radio_info = []
+            for name, radios in list(radio_groups.items())[:5]:  # 최대 5개 그룹만
+                labels = [r.get('label', '옵션') for r in radios[:5]]
+                radio_info.append(f"  그룹 '{name}': {', '.join(labels)}")
+            
+            checkbox_info = []
+            for name, cbs in list(checkbox_groups.items())[:5]:
+                labels = [cb.get('label', '옵션') for cb in cbs[:5]]
+                checkbox_info.append(f"  그룹 '{name}': {', '.join(labels)}")
+            
+            prompt = f"""다음 설문조사 페이지 정보를 분석하여 각 질문의 타입을 판단하세요.
+
+발견된 질문들:
+{chr(10).join(questions_info) if questions_info else '질문 없음'}
+
+발견된 라디오 버튼 그룹:
+{chr(10).join(radio_info) if radio_info else '라디오 버튼 없음'}
+
+발견된 체크박스 그룹:
+{chr(10).join(checkbox_info) if checkbox_info else '체크박스 없음'}
+
+각 질문에 대해 다음 정보를 JSON 형식으로 제공하세요:
+1. 질문 텍스트
+2. 질문 타입: "객관식_라디오", "객관식_체크박스", "주관식_텍스트", "주관식_숫자", "주관식_이메일", "주관식_전화번호", "주관식_날짜", "버튼"
+3. 선택지 (객관식인 경우)
+
+JSON 형식:
+{{
+  "questions": [
+    {{
+      "question": "질문 텍스트",
+      "type": "객관식_라디오",
+      "options": ["옵션1", "옵션2"]
+    }}
+  ]
+}}
+
+답변은 JSON만 제공하세요."""
+
+            response = self.transformer.api_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "당신은 설문조사 페이지를 분석하는 전문가입니다. 질문과 발견된 요소들을 분석하여 각 질문의 타입을 정확히 판단하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=2000,
+                temperature=0.1
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            print(f"  DeepSeek 페이지 분석 결과: {result_text[:200]}...")
+            
+            # JSON 추출
+            import json
+            json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                return result
+            
+            return None
+        except Exception as e:
+            # API 오류가 발생하면 플래그 설정하고 더 이상 API 사용 안 함
+            if not self.transformer.api_error_occurred:
+                error_msg = str(e)
+                if '401' in error_msg or 'invalid_api_key' in error_msg or 'Incorrect API key' in error_msg:
+                    print(f"  ⚠️ API 키 오류가 발생했습니다. API 기능을 비활성화하고 기본 로직을 사용합니다.")
+                else:
+                    print(f"  ⚠️ DeepSeek 페이지 분석 오류: {error_msg[:100]}")
+                self.transformer.api_error_occurred = True
+            return None
+    
     def _parse_page(self):
         """AI 기반 페이지 파싱 - 질문, 문항, 버튼, 입력란 찾기"""
         try:
@@ -403,6 +625,9 @@ class SurveyAutoFill:
                 lambda d: d.execute_script('return document.readyState') == 'complete'
             )
             time.sleep(2)
+            
+            # DeepSeek으로 페이지 구조 분석 시도 (질문을 먼저 찾은 후)
+            # 질문을 먼저 찾고 나서 DeepSeek 분석을 수행하는 것이 더 효과적
             
             questions = []
             seen_questions = set()
@@ -423,33 +648,200 @@ class SurveyAutoFill:
                 except:
                     continue
             
-            # 2. 라디오/체크박스 찾기
-            radio_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
-            checkbox_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            # 2. 라디오/체크박스 찾기 (다양한 방법 시도)
+            radio_inputs = []
+            checkbox_inputs = []
+            
+            # 방법 1: 표준 input[type='radio']
+            try:
+                radio_inputs.extend(self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']"))
+            except:
+                pass
+            
+            # 방법 2: role='radio' 속성을 가진 요소
+            try:
+                radio_elements = self.driver.find_elements(By.CSS_SELECTOR, "[role='radio']")
+                for elem in radio_elements:
+                    # 실제 input 요소를 찾거나 클릭 가능한 요소로 사용
+                    try:
+                        input_elem = elem.find_element(By.XPATH, ".//input[@type='radio']")
+                        if input_elem not in radio_inputs:
+                            radio_inputs.append(input_elem)
+                    except:
+                        # input이 없으면 요소 자체를 사용 (커스텀 라디오 버튼)
+                        if elem not in radio_inputs:
+                            radio_inputs.append(elem)
+            except:
+                pass
+            
+            # 방법 3: aria-checked 속성을 가진 요소 (라디오/체크박스)
+            try:
+                aria_elements = self.driver.find_elements(By.CSS_SELECTOR, "[aria-checked]")
+                for elem in aria_elements:
+                    role = elem.get_attribute('role') or ''
+                    elem_class = elem.get_attribute('class') or ''
+                    if role == 'radio' or 'radio' in elem_class:
+                        if elem not in radio_inputs:
+                            radio_inputs.append(elem)
+                    elif role == 'checkbox' or 'checkbox' in elem_class:
+                        if elem not in checkbox_inputs:
+                            checkbox_inputs.append(elem)
+            except:
+                pass
+            
+            # 방법 4: label과 연결된 input 찾기
+            try:
+                labels = self.driver.find_elements(By.TAG_NAME, "label")
+                for label in labels:
+                    try:
+                        label_for = label.get_attribute('for')
+                        if label_for:
+                            input_elem = self.driver.find_element(By.ID, label_for)
+                            input_type = input_elem.get_attribute('type')
+                            if input_type == 'radio' and input_elem not in radio_inputs:
+                                radio_inputs.append(input_elem)
+                            elif input_type == 'checkbox' and input_elem not in checkbox_inputs:
+                                checkbox_inputs.append(input_elem)
+                    except:
+                        # label 내부의 input 찾기
+                        try:
+                            input_elem = label.find_element(By.CSS_SELECTOR, "input[type='radio'], input[type='checkbox']")
+                            input_type = input_elem.get_attribute('type')
+                            if input_type == 'radio' and input_elem not in radio_inputs:
+                                radio_inputs.append(input_elem)
+                            elif input_type == 'checkbox' and input_elem not in checkbox_inputs:
+                                checkbox_inputs.append(input_elem)
+                        except:
+                            pass
+            except:
+                pass
+            
+            # 방법 5: 표준 input[type='checkbox']
+            try:
+                checkbox_inputs.extend(self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']"))
+            except:
+                pass
+            
+            # 중복 제거
+            radio_inputs = list(dict.fromkeys(radio_inputs))  # 순서 유지하면서 중복 제거
+            checkbox_inputs = list(dict.fromkeys(checkbox_inputs))
+            
+            print(f"  발견된 라디오 버튼 수: {len(radio_inputs)}")
+            print(f"  발견된 체크박스 수: {len(checkbox_inputs)}")
+            
+            # 디버깅: 라디오 버튼이 없으면 페이지 구조 확인
+            if len(radio_inputs) == 0 and len(checkbox_inputs) == 0:
+                print(f"  ⚠️ 라디오/체크박스를 찾지 못했습니다. 페이지 구조 확인 중...")
+                try:
+                    # 다른 선택 가능한 요소 찾기
+                    clickable_elements = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "[onclick], [data-value], [data-option], .option, .choice, .select-item")
+                    print(f"    클릭 가능한 요소 수: {len(clickable_elements)}")
+                    
+                    # select 요소 찾기
+                    select_elements = self.driver.find_elements(By.TAG_NAME, "select")
+                    print(f"    select 요소 수: {len(select_elements)}")
+                    
+                    # 버튼이나 클릭 가능한 요소 찾기
+                    clickable_buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "button[class*='option'], button[class*='choice'], div[class*='option'][role='button']")
+                    print(f"    옵션 버튼 수: {len(clickable_buttons)}")
+                except Exception as e:
+                    print(f"    페이지 구조 확인 오류: {e}")
             
             radio_groups = {}
+            unnamed_radio_index = 0  # name이 없는 라디오 버튼용 인덱스
+            
             for radio in radio_inputs:
                 try:
+                    if not radio.is_displayed():
+                        continue
+                    
+                    # name 속성 가져오기 (input 요소인 경우)
                     name = radio.get_attribute('name') or ''
-                    if name:
-                        if name not in radio_groups:
-                            radio_groups[name] = []
-                        label = self._get_label_for_input(radio)
-                        radio_groups[name].append({'element': radio, 'label': label})
-                except:
+                    
+                    # name이 없으면 고유한 키 생성 (부모 요소 기반)
+                    if not name:
+                        try:
+                            # aria-label이나 data-name 등 다른 속성 확인
+                            name = (radio.get_attribute('aria-label') or 
+                                   radio.get_attribute('data-name') or 
+                                   radio.get_attribute('data-group') or '')
+                            
+                            # 여전히 name이 없으면 부모 요소 기반으로 생성
+                            if not name:
+                                parent = radio.find_element(By.XPATH, "./..")
+                                parent_id = parent.get_attribute('id') or ''
+                                parent_class = parent.get_attribute('class') or ''
+                                # 부모의 id나 class를 사용하여 그룹화
+                                if parent_id:
+                                    name = f"_unnamed_group_{parent_id}"
+                                elif parent_class:
+                                    name = f"_unnamed_group_{parent_class[:30]}"
+                                else:
+                                    # 마지막 수단: 인덱스 사용
+                                    name = f"_unnamed_radio_{unnamed_radio_index}"
+                                    unnamed_radio_index += 1
+                        except:
+                            name = f"_unnamed_radio_{unnamed_radio_index}"
+                            unnamed_radio_index += 1
+                    
+                    if name not in radio_groups:
+                        radio_groups[name] = []
+                    label = self._get_label_for_input(radio)
+                    radio_groups[name].append({'element': radio, 'label': label})
+                    print(f"    라디오 버튼 추가: name={name}, label={label}")
+                except Exception as e:
+                    print(f"    라디오 버튼 처리 오류: {e}")
                     continue
             
             checkbox_groups = {}
+            unnamed_checkbox_index = 0
+            
             for cb in checkbox_inputs:
                 try:
+                    if not cb.is_displayed():
+                        continue
                     name = cb.get_attribute('name') or ''
-                    if name:
-                        if name not in checkbox_groups:
-                            checkbox_groups[name] = []
-                        label = self._get_label_for_input(cb)
-                        checkbox_groups[name].append({'element': cb, 'label': label})
-                except:
+                    # name이 없으면 고유한 키 생성
+                    if not name:
+                        try:
+                            parent = cb.find_element(By.XPATH, "./..")
+                            parent_id = parent.get_attribute('id') or ''
+                            parent_class = parent.get_attribute('class') or ''
+                            if parent_id:
+                                name = f"_unnamed_cb_group_{parent_id}"
+                            elif parent_class:
+                                name = f"_unnamed_cb_group_{parent_class[:30]}"
+                            else:
+                                name = f"_unnamed_checkbox_{unnamed_checkbox_index}"
+                                unnamed_checkbox_index += 1
+                        except:
+                            name = f"_unnamed_checkbox_{unnamed_checkbox_index}"
+                            unnamed_checkbox_index += 1
+                    
+                    if name not in checkbox_groups:
+                        checkbox_groups[name] = []
+                    label = self._get_label_for_input(cb)
+                    checkbox_groups[name].append({'element': cb, 'label': label})
+                except Exception as e:
+                    print(f"    체크박스 처리 오류: {e}")
                     continue
+            
+            print(f"  라디오 그룹 수: {len(radio_groups)}")
+            print(f"  체크박스 그룹 수: {len(checkbox_groups)}")
+            
+            # DeepSeek으로 페이지 구조 분석 시도 (질문과 요소를 찾은 후)
+            if self.transformer.api_client and self.transformer.api_provider == 'deepseek' and not self.transformer.api_error_occurred:
+                try:
+                    question_texts = [q[1] for q in question_elements]
+                    deepseek_analysis = self._analyze_page_structure_with_deepseek(
+                        question_texts, radio_groups, checkbox_groups, []
+                    )
+                    if deepseek_analysis and deepseek_analysis.get('questions'):
+                        print(f"  DeepSeek 분석 완료: {len(deepseek_analysis.get('questions', []))}개 질문 발견")
+                except Exception as e:
+                    print(f"  DeepSeek 분석 시도 실패: {e}")
             
             # 3. 텍스트 입력란 찾기
             text_inputs = []
@@ -513,7 +905,9 @@ class SurveyAutoFill:
                     try:
                         # 부모 컨테이너 찾기 (fieldset, div, form 등)
                         for xpath in ["./ancestor::fieldset[1]", "./ancestor::div[@class*='question'][1]", 
-                                     "./ancestor::div[@class*='form'][1]", "./ancestor::li[1]", "./.."]:
+                                     "./ancestor::div[@class*='form'][1]", "./ancestor::div[@class*='survey'][1]",
+                                     "./ancestor::div[@class*='item'][1]", "./ancestor::li[1]", 
+                                     "./ancestor::div[@role='group'][1]", "./.."]:
                             try:
                                 container = question_elem.find_element(By.XPATH, xpath)
                                 if container:
@@ -523,33 +917,53 @@ class SurveyAutoFill:
                     except:
                         pass
                     
-                    # 라디오 버튼 찾기 (질문과 가까운 것만)
+                    # 라디오 버튼 찾기 (개선된 로직)
                     options = []
                     for name, radios in radio_groups.items():
                         if name in used_radio_names:
                             continue
                         try:
+                            matched_radios = []
+                            
                             # 컨테이너 내에 있는지 확인
                             if container:
-                                if container.find_elements(By.CSS_SELECTOR, f"input[name='{name}']"):
-                                    # 질문과 가까운지 확인
-                                    first_radio = radios[0]['element']
-                                    try:
-                                        radio_rect = first_radio.rect
-                                        radio_y = radio_rect['y']
-                                        # 질문 아래 500px 이내에 있는 것만
-                                        if radio_y >= question_y and radio_y <= question_y + 500:
-                                            options.extend(radios)
+                                try:
+                                    # name 속성으로 찾기
+                                    container_radios = container.find_elements(By.CSS_SELECTOR, f"input[type='radio'][name='{name}']")
+                                    if not container_radios:
+                                        # name이 없는 경우 다른 방법으로 찾기
+                                        container_radios = container.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+                                    
+                                    if container_radios:
+                                        # 컨테이너 내의 라디오 버튼만 필터링
+                                        for radio_info in radios:
+                                            radio_elem = radio_info['element']
+                                            if id(radio_elem) in used_elements:
+                                                continue
+                                            # 컨테이너 내에 있는지 확인
+                                            try:
+                                                if radio_elem in container_radios or container.find_elements(By.XPATH, f".//input[@id='{radio_elem.get_attribute('id')}']"):
+                                                    matched_radios.append(radio_info)
+                                            except:
+                                                # 위치 기반으로 확인
+                                                try:
+                                                    radio_rect = radio_elem.rect
+                                                    radio_y = radio_rect['y']
+                                                    # 질문 아래 1000px 이내에 있는 것 (범위 확대)
+                                                    if radio_y >= question_y - 100 and radio_y <= question_y + 1000:
+                                                        matched_radios.append(radio_info)
+                                                except:
+                                                    matched_radios.append(radio_info)
+                                        if matched_radios:
+                                            options.extend(matched_radios)
                                             used_radio_names.add(name)
-                                            for radio in radios:
+                                            for radio in matched_radios:
                                                 used_elements.add(id(radio['element']))
-                                    except:
-                                        options.extend(radios)
-                                        used_radio_names.add(name)
-                                        for radio in radios:
-                                            used_elements.add(id(radio['element']))
-                            else:
-                                # 컨테이너가 없으면 질문과 가까운 것만
+                                except Exception as e:
+                                    print(f"    컨테이너 내 라디오 찾기 오류: {e}")
+                            
+                            # 컨테이너가 없거나 매칭 실패 시 위치 기반으로 찾기
+                            if not matched_radios:
                                 for radio_info in radios:
                                     radio_elem = radio_info['element']
                                     if id(radio_elem) in used_elements:
@@ -557,15 +971,20 @@ class SurveyAutoFill:
                                     try:
                                         radio_rect = radio_elem.rect
                                         radio_y = radio_rect['y']
-                                        # 질문 아래 500px 이내에 있는 것만
-                                        if radio_y >= question_y and radio_y <= question_y + 500:
-                                            options.append(radio_info)
+                                        # 질문 아래 1000px 이내에 있는 것 (범위 확대)
+                                        if radio_y >= question_y - 100 and radio_y <= question_y + 1000:
+                                            matched_radios.append(radio_info)
                                             used_elements.add(id(radio_elem))
                                     except:
-                                        pass
-                                if options:
+                                        # 위치 정보를 가져올 수 없으면 일단 추가 (마지막 수단)
+                                        matched_radios.append(radio_info)
+                                        used_elements.add(id(radio_elem))
+                                
+                                if matched_radios:
+                                    options.extend(matched_radios)
                                     used_radio_names.add(name)
-                        except:
+                        except Exception as e:
+                            print(f"    라디오 버튼 매칭 오류: {e}")
                             pass
                     
                     # 체크박스 찾기 (질문과 가까운 것만)
@@ -680,11 +1099,57 @@ class SurveyAutoFill:
             
             # 질문이 없지만 요소가 있는 경우 (사용되지 않은 요소만)
             if not questions:
+                # 사용되지 않은 라디오 버튼 찾기
+                unused_radio_groups = []
+                for name, radios in radio_groups.items():
+                    if name not in used_radio_names:
+                        unused_radios = [r for r in radios if id(r['element']) not in used_elements]
+                        if unused_radios:
+                            unused_radio_groups.extend(unused_radios)
+                
+                # 사용되지 않은 체크박스 찾기
+                unused_checkbox_groups = []
+                for name, checkboxes in checkbox_groups.items():
+                    if name not in used_checkbox_names:
+                        unused_cbs = [cb for cb in checkboxes if id(cb['element']) not in used_elements]
+                        if unused_cbs:
+                            unused_checkbox_groups.extend(unused_cbs)
+                
                 unused_text_inputs = [inp for inp in text_inputs if id(inp['element']) not in used_elements]
                 unused_buttons = [btn for btn in buttons if id(btn['element']) not in used_elements]
                 
-                if unused_text_inputs:
+                # 우선순위: 라디오 > 체크박스 > 텍스트 입력 > 버튼
+                if unused_radio_groups:
+                    # 라디오 그룹별로 묶기
+                    grouped_radios = {}
+                    for radio_info in unused_radio_groups:
+                        radio_elem = radio_info['element']
+                        radio_name = radio_elem.get_attribute('name') or f"_ungrouped_{id(radio_elem)}"
+                        if radio_name not in grouped_radios:
+                            grouped_radios[radio_name] = []
+                        grouped_radios[radio_name].append(radio_info)
+                    
+                    # 각 그룹을 별도의 질문으로 추가
+                    for name, radios in grouped_radios.items():
+                        if radios:
+                            questions.append({'type': 'radio', 'question': f'선택 ({len(radios)}개 옵션)', 'options': radios})
+                            print(f"  ✓ 라디오 버튼 발견 (질문 없음): {len(radios)}개 옵션")
+                elif unused_checkbox_groups:
+                    grouped_checkboxes = {}
+                    for cb_info in unused_checkbox_groups:
+                        cb_elem = cb_info['element']
+                        cb_name = cb_elem.get_attribute('name') or f"_ungrouped_{id(cb_elem)}"
+                        if cb_name not in grouped_checkboxes:
+                            grouped_checkboxes[cb_name] = []
+                        grouped_checkboxes[cb_name].append(cb_info)
+                    
+                    for name, cbs in grouped_checkboxes.items():
+                        if cbs:
+                            questions.append({'type': 'checkbox', 'question': f'선택 ({len(cbs)}개 옵션)', 'options': cbs})
+                            print(f"  ✓ 체크박스 발견 (질문 없음): {len(cbs)}개 옵션")
+                elif unused_text_inputs:
                     questions.append({'type': 'text', 'question': '텍스트 입력', 'inputs': unused_text_inputs})
+                    print(f"  ✓ 텍스트 입력란 발견 (질문 없음): {len(unused_text_inputs)}개")
                 elif unused_buttons:
                     # 다음/제출 버튼은 제외
                     filtered_buttons = [btn for btn in unused_buttons 
@@ -692,6 +1157,7 @@ class SurveyAutoFill:
                                                  for kw in ['다음', 'next', '제출', 'submit', '확인', 'confirm'])]
                     if filtered_buttons:
                         questions.append({'type': 'button', 'question': '버튼 클릭', 'options': filtered_buttons})
+                        print(f"  ✓ 버튼 발견 (질문 없음): {len(filtered_buttons)}개")
             
             return questions
         except Exception as e:
@@ -739,33 +1205,100 @@ class SurveyAutoFill:
         return text.strip()
     
     def _get_label_for_input(self, input_elem):
-        """입력 필드의 라벨 찾기"""
+        """입력 필드의 라벨 찾기 (라디오/체크박스 포함)"""
         try:
+            # 1. id 속성으로 label[for] 찾기
             inp_id = input_elem.get_attribute('id')
             if inp_id:
                 try:
                     label = self.driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
                     text = label.text.strip()
-                    if text and text != '옵션':
+                    if text and text != '옵션' and len(text) > 0:
                         return text
                 except:
                     pass
             
+            # 2. 부모 요소에서 라벨 찾기 (라디오/체크박스용)
             try:
                 parent = input_elem.find_element(By.XPATH, "./..")
-                labels = parent.find_elements(By.CSS_SELECTOR, "label, span, div")
-                for label in labels:
-                    text = label.text.strip()
-                    if text and text != '옵션' and len(text) < 50:
+                
+                # 부모가 label인 경우
+                if parent.tag_name.lower() == 'label':
+                    text = parent.text.strip()
+                    if text and text != '옵션' and len(text) > 0:
+                        return text
+                
+                # 부모 내에서 label 요소 찾기
+                try:
+                    labels = parent.find_elements(By.CSS_SELECTOR, "label")
+                    for label in labels:
+                        # 라디오 버튼과 연결된 label인지 확인
+                        label_for = label.get_attribute('for')
+                        if label_for == inp_id or not label_for:
+                            text = label.text.strip()
+                            if text and text != '옵션' and len(text) > 0 and len(text) < 100:
+                                return text
+                except:
+                    pass
+                
+                # 부모 내에서 span, div 등에서 텍스트 찾기
+                try:
+                    text_elements = parent.find_elements(By.CSS_SELECTOR, "span, div, p, td")
+                    for elem in text_elements:
+                        text = elem.text.strip()
+                        # input 요소가 아닌 텍스트만 있는 요소 찾기
+                        if text and text != '옵션' and len(text) > 0 and len(text) < 100:
+                            # input 요소를 포함하지 않는지 확인
+                            if not elem.find_elements(By.CSS_SELECTOR, "input, select, textarea"):
+                                return text
+                except:
+                    pass
+                
+                # 부모의 직접 텍스트 (다른 요소 제외)
+                try:
+                    parent_text = parent.text.strip()
+                    # 자식 요소의 텍스트를 제외한 순수 텍스트 찾기
+                    child_texts = []
+                    for child in parent.find_elements(By.XPATH, "./*"):
+                        child_text = child.text.strip()
+                        if child_text:
+                            child_texts.append(child_text)
+                    
+                    if parent_text:
+                        # 자식 텍스트를 제외한 텍스트
+                        for child_text in child_texts:
+                            parent_text = parent_text.replace(child_text, '').strip()
+                        if parent_text and len(parent_text) > 0 and len(parent_text) < 100:
+                            return parent_text
+                except:
+                    pass
+            except:
+                pass
+            
+            # 3. aria-label 속성
+            aria_label = input_elem.get_attribute('aria-label')
+            if aria_label and aria_label != '옵션' and len(aria_label) > 0:
+                return aria_label
+            
+            # 4. value 속성 (라디오 버튼의 경우)
+            value = input_elem.get_attribute('value')
+            if value and value != '옵션' and len(value) > 0 and len(value) < 100:
+                return value
+            
+            # 5. 다음 형제 요소에서 텍스트 찾기
+            try:
+                following_sibling = input_elem.find_element(By.XPATH, "./following-sibling::*[1]")
+                if following_sibling:
+                    text = following_sibling.text.strip()
+                    if text and text != '옵션' and len(text) > 0 and len(text) < 100:
                         return text
             except:
                 pass
             
-            aria_label = input_elem.get_attribute('aria-label')
-            if aria_label and aria_label != '옵션':
-                return aria_label
-        except:
+        except Exception as e:
+            print(f"    라벨 찾기 오류: {e}")
             pass
+        
         return '옵션'
     
     def _click_element(self, element):
@@ -878,25 +1411,35 @@ class SurveyAutoFill:
                     print(f"    질문: {question_text[:50]}...")
                     
                     if q_type == 'radio' or q_type == 'checkbox':
-                        # AI로 답변 선택
+                        # DeepSeek으로 질문 타입 확인 및 답변 선택
                         options = q.get('options', [])
                         if options:
+                            # DeepSeek으로 질문과 옵션 분석
+                            if self.transformer.api_client and self.transformer.api_provider == 'deepseek':
+                                print(f"      DeepSeek으로 질문 분석 중...")
+                            
                             answer_idx = self.transformer.understand_question(question_text, options)
                             if answer_idx < len(options):
                                 element = options[answer_idx].get('element')
                                 if element:
                                     if self._click_element(element):
                                         answered_count += 1
-                                        print(f"      ✓ 선택: {options[answer_idx].get('label', '옵션')}")
+                                        option_label = options[answer_idx].get('label', '옵션')
+                                        print(f"      ✓ 선택: {option_label} (인덱스: {answer_idx + 1}/{len(options)})")
                     
                     elif q_type == 'text':
-                        # 텍스트 입력
+                        # 텍스트 입력 (DeepSeek으로 질문 타입 확인)
                         inputs = q.get('inputs', [])
                         for inp_info in inputs:
                             try:
                                 element = inp_info.get('element')
                                 input_type = inp_info.get('type', 'text')
                                 label = inp_info.get('label', question_text)
+                                
+                                # DeepSeek으로 질문 타입 확인 및 답변 생성
+                                if self.transformer.api_client and self.transformer.api_provider == 'deepseek':
+                                    print(f"      DeepSeek으로 입력 타입 분석 중... ({input_type})")
+                                
                                 # 질문 텍스트와 라벨을 조합하여 더 정확한 답변 생성
                                 combined_text = f"{question_text} {label}".strip()
                                 answer = self.transformer.generate_text_answer(combined_text, input_type)
@@ -1125,26 +1668,52 @@ class SurveyAutoFill:
                         
                         print(f"  질문: {question_text[:50]}...")
                         
+                        # DeepSeek으로 질문 타입 확인 (옵션)
+                        options = q.get('options', [])
+                        inputs = q.get('inputs', [])
+                        if self.transformer.api_client and self.transformer.api_provider == 'deepseek':
+                            deepseek_type = self.transformer._determine_question_type_with_deepseek(
+                                question_text, options, inputs
+                            )
+                            if deepseek_type:
+                                print(f"    DeepSeek 타입 판단: {deepseek_type}")
+                        
+                        print(f"    감지된 타입: {q_type}")
+                        
                         if q_type == 'radio' or q_type == 'checkbox':
-                            # AI로 답변 선택
-                            options = q.get('options', [])
+                            # DeepSeek으로 질문 타입 확인 및 답변 선택
                             if options:
+                                # 질문 타입 출력
+                                type_label = '라디오 버튼' if q_type == 'radio' else '체크박스'
+                                print(f"    타입: {type_label} (객관식, {len(options)}개 옵션)")
+                                
+                                # DeepSeek으로 질문과 옵션 분석
+                                if self.transformer.api_client and self.transformer.api_provider == 'deepseek':
+                                    print(f"    DeepSeek으로 질문 분석 중...")
+                                
                                 answer_idx = self.transformer.understand_question(question_text, options)
                                 if answer_idx < len(options):
                                     element = options[answer_idx].get('element')
                                     if element:
                                         if self._click_element(element):
                                             answered_count += 1
-                                            print(f"    ✓ 선택: {options[answer_idx].get('label', '옵션')}")
+                                            option_label = options[answer_idx].get('label', '옵션')
+                                            print(f"    ✓ 선택: {option_label} (인덱스: {answer_idx + 1}/{len(options)})")
                         
                         elif q_type == 'text':
-                            # 텍스트 입력
-                            inputs = q.get('inputs', [])
+                            # 텍스트 입력 (DeepSeek으로 질문 타입 확인)
+                            print(f"    타입: 텍스트 입력란 (주관식, {len(inputs)}개 입력란)")
+                            
                             for inp_info in inputs:
                                 try:
                                     element = inp_info.get('element')
                                     input_type = inp_info.get('type', 'text')
                                     label = inp_info.get('label', question_text)
+                                    
+                                    # DeepSeek으로 질문 타입 확인 및 답변 생성
+                                    if self.transformer.api_client and self.transformer.api_provider == 'deepseek':
+                                        print(f"    DeepSeek으로 입력 타입 분석 중... ({input_type})")
+                                    
                                     # 질문 텍스트와 라벨을 조합하여 더 정확한 답변 생성
                                     combined_text = f"{question_text} {label}".strip()
                                     answer = self.transformer.generate_text_answer(combined_text, input_type)
