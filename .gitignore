@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Flask
+instance/
+.webassets-cache
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Downloads folder (contains large video/audio files)
+downloads/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.mpg
+*.mpeg
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+
+# Analysis results (can be large)
+downloads/analysis/
+
+# Temporary files
+*.tmp
+*.temp
+temp_frames/
+temp_audio.wav
+
+# Model cache (if stored locally)
+models/
+*.bin
+*.safetensors
+
+# Logs
+*.log
+
