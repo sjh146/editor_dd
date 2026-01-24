@@ -16,4 +16,6 @@ openai
 webdriver-manager
 sentencepiece
 accelerate
-gtts 
+gtts
+openai-whisper
+Pillow 

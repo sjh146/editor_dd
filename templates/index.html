@@ -26,16 +26,6 @@
             </button>
           </li>
           <li class="nav-item" role="presentation">
-            <button class="nav-link" id="survey-tab" data-bs-toggle="tab" data-bs-target="#survey" type="button" role="tab">
-              <span class="section-icon">🤖</span> AI Survey
-            </button>
-          </li>
-          <li class="nav-item" role="presentation">
-            <button class="nav-link" id="chatbot-tab" data-bs-toggle="tab" data-bs-target="#chatbot" type="button" role="tab">
-              <span class="section-icon">💬</span> 편집 조수
-            </button>
-          </li>
-          <li class="nav-item" role="presentation">
             <button class="nav-link" id="tts-tab" data-bs-toggle="tab" data-bs-target="#tts" type="button" role="tab">
               <span class="section-icon">🔊</span> AI TTS
             </button>
@@ -203,236 +193,46 @@
           </form>
         </div>
       </div>
-        </div>
 
-        <!-- AI Survey Tab -->
-        <div class="tab-pane fade" id="survey" role="tabpanel">
-          <h2 class="mt-3">🤖 AI 설문조사 자동화</h2>
-      <div class="card my-4 modern-panel">
+      <!-- 동영상 분석 및 요약 -->
+      <div class="card my-4">
+        <div class="card-header">
+          <h5 class="mb-0">🤖 AI Video Analysis (동영상 내용 분석 및 요약)</h5>
+        </div>
         <div class="card-body">
-          <p class="text-muted">설문조사 웹페이지를 분석하고 AI가 자동으로 답변을 체크합니다.</p>
-          
-          <div class="mb-3">
-            <label for="survey_url" class="form-label">설문조사 URL</label>
-            <input type="url" class="form-control" id="survey_url" placeholder="https://example.com/survey" required>
-          </div>
-          
-          <div class="row mb-3">
-            <div class="col-md-6">
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="use_api">
-                <label class="form-check-label" for="use_api">
-                  AI API 사용 (더 정확한 답변)
-                </label>
-              </div>
-            </div>
-            <div class="col-md-6">
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="headless_mode" checked>
-                <label class="form-check-label" for="headless_mode">
-                  백그라운드 모드 (브라우저 숨김)
-                </label>
-              </div>
-            </div>
-          </div>
-          
-          <div class="mb-3">
-            <label for="browser_type" class="form-label">브라우저 선택</label>
-            <select class="form-select" id="browser_type">
-              <option value="edge" selected>Microsoft Edge (기본값)</option>
-              <option value="chrome">Google Chrome</option>
-            </select>
-            <small class="form-text text-muted">사용할 브라우저를 선택하세요</small>
-          </div>
-          
-          <div class="mb-3" id="api_key_group" style="display: none;">
-            <div class="mb-2">
-              <label for="api_provider" class="form-label">API Provider</label>
-              <select class="form-select" id="api_provider">
-                <option value="openai" selected>OpenAI</option>
-                <option value="deepseek">DeepSeek</option>
+          <p class="text-muted">동영상의 음성을 텍스트로 변환하고 내용을 분석하여 요약을 생성합니다.</p>
+          <form action="/analyze_video" method="post" id="analyze-video-form">
+            <div class="mb-3">
+              <label for="analyze_filename" class="form-label">분석할 동영상 파일 선택</label>
+              <select class="form-select" name="filename" id="analyze_filename" required>
+                <option selected disabled value="">동영상 파일 선택...</option>
+                {% for file in video_files %}
+                  <option value="{{ file }}">{{ file }}</option>
+                {% endfor %}
               </select>
+              {% if not video_files %}
+                <small class="form-text text-muted text-danger">분석할 동영상 파일이 없습니다.</small>
+              {% else %}
+                <small class="form-text text-muted">분석할 동영상을 선택하세요. 음성이 있는 동영상에서 더 정확한 분석이 가능합니다.</small>
+              {% endif %}
             </div>
-            <div>
-              <label for="api_key" class="form-label">API Key (선택사항)</label>
-              <input type="password" class="form-control" id="api_key" placeholder="sk-...">
-              <small class="form-text text-muted">비워두면 환경변수에서 자동으로 로드됩니다 (OPENAI_API_KEY 또는 DEEPSEEK_API_KEY)</small>
-            </div>
-          </div>
-          
-          <div class="mb-3">
-            <div class="form-check">
-              <input class="form-check-input" type="checkbox" id="auto_submit">
-              <label class="form-check-label" for="auto_submit">
-                자동 제출 (체크 시 자동으로 설문 제출)
-              </label>
-            </div>
-          </div>
-          
-          <div class="mb-3">
-            <div class="form-check">
-              <input class="form-check-input" type="checkbox" id="paginated_mode" checked>
-              <label class="form-check-label" for="paginated_mode">
-                페이지네이션 모드 (SurveyMonkey 등 여러 페이지 설문조사에 사용)
-              </label>
-              <small class="form-text text-muted d-block">
-                체크 시: 각 페이지를 순회하면서 실시간으로 질문 파싱 및 답변<br>
-                해제 시: 한 페이지에서 모든 질문을 미리 분석 (간단한 설문조사용)
-              </small>
-            </div>
-          </div>
-          
-          <div class="d-grid gap-2">
-            <button type="button" class="btn btn-info" id="analyze_survey_btn">
-              📋 설문조사 분석 (페이지네이션 모드 제외)
+            <button type="submit" class="btn btn-success w-100" {% if not video_files %}disabled{% endif %}>
+              <span id="analyze-loading" style="display: none;">
+                <span class="spinner-border spinner-border-sm me-2"></span>분석 중...
+              </span>
+              <span id="analyze-text">동영상 분석 시작</span>
             </button>
-            <button type="button" class="btn btn-success" id="fill_survey_btn">
-              ✏️ AI로 자동 작성
-            </button>
-          </div>
-          
-          <div id="survey_loading" class="mt-3" style="display: none;">
-            <div class="spinner-border text-primary" role="status">
-              <span class="visually-hidden">처리 중...</span>
+          </form>
+          <div id="analysis-result" class="mt-3" style="display: none;">
+            <div class="alert alert-info">
+              <h6>분석 결과</h6>
+              <div id="analysis-content"></div>
             </div>
-            <span class="ms-2">처리 중입니다. 잠시만 기다려주세요...</span>
-          </div>
-          
-          <div id="survey_results" class="mt-4" style="display: none;">
-            <h5>분석 결과</h5>
-            <div id="survey_questions_list"></div>
-          </div>
-          
-          <div id="survey_fill_results" class="mt-4" style="display: none;">
-            <h5>작성 결과</h5>
-            <div id="fill_results_list"></div>
           </div>
         </div>
       </div>
         </div>
-      </div>
 
-      <!-- 챗봇 탭 -->
-      <div class="tab-pane fade" id="chatbot" role="tabpanel">
-        <h2 class="mt-3">💬 편집 조수 챗봇</h2>
-        <div class="card my-4 modern-panel">
-          <div class="card-body">
-            <p class="text-muted">편집 작업을 도와주는 한국어 챗봇입니다. 코드 작성, 파일 편집, 문제 해결 등을 도와드립니다.</p>
-            
-            <!-- 챗봇 메시지 영역 -->
-            <div id="chatbot-messages" style="height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin-bottom: 15px; background-color: #f8f9fa;">
-              <div class="message bot-message mb-3">
-                <div class="d-flex align-items-start">
-                  <div class="me-2">🤖</div>
-                  <div>
-                    <div class="message-content bg-white p-3 rounded shadow-sm" style="color: #212529 !important;">
-                      안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요?
-                    </div>
-                    <small class="text-muted">시스템</small>
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            <!-- 입력 영역 -->
-            <div class="input-group">
-              <input type="text" class="form-control" id="chatbot-input" placeholder="메시지를 입력하세요..." onkeypress="if(event.key === 'Enter') sendChatbotMessage()">
-              <button class="btn btn-primary" type="button" onclick="sendChatbotMessage()">전송</button>
-            </div>
-            
-            <div class="mt-2">
-              <small class="text-muted">💡 팁: "파일 편집 도와줘", "코드 작성 도와줘" 등으로 질문하세요.</small>
-            </div>
-            
-            <!-- 학습 기능 버튼 -->
-            <div class="mt-3">
-              <button class="btn btn-info btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#learnPanel" aria-expanded="false">
-                📚 챗봇 학습하기
-              </button>
-              <button class="btn btn-secondary btn-sm" type="button" onclick="showLearningStats()">
-                📊 학습 통계
-              </button>
-            </div>
-            
-            <!-- 학습 패널 -->
-            <div class="collapse mt-3" id="learnPanel">
-              <div class="card" style="background-color: rgba(255, 255, 255, 0.95);">
-                <div class="card-header" style="background-color: #f8f9fa; border-bottom: 2px solid #dee2e6;">
-                  <h5 class="mb-0" style="color: #212529 !important;">챗봇 학습</h5>
-                </div>
-                <div class="card-body" style="color: #212529 !important;">
-                  <ul class="nav nav-tabs mb-3" role="tablist">
-                    <li class="nav-item">
-                      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#qa-learn" type="button" style="color: #212529;">Q&A 학습</button>
-                    </li>
-                    <li class="nav-item">
-                      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#example-learn" type="button" style="color: #212529;">예제 학습</button>
-                    </li>
-                    <li class="nav-item">
-                      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#feedback-learn" type="button" style="color: #212529;">피드백</button>
-                    </li>
-                  </ul>
-                  
-                  <div class="tab-content">
-                    <!-- Q&A 학습 탭 -->
-                    <div class="tab-pane fade show active" id="qa-learn">
-                      <div class="mb-3">
-                        <label for="learn-question" class="form-label" style="color: #212529 !important;">질문</label>
-                        <input type="text" class="form-control" id="learn-question" placeholder="예: Flask 라우트 만드는 방법?" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
-                      </div>
-                      <div class="mb-3">
-                        <label for="learn-answer" class="form-label" style="color: #212529 !important;">답변</label>
-                        <textarea class="form-control" id="learn-answer" rows="5" placeholder="답변을 입력하세요. 코드 예시를 포함하면 더 좋습니다." style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
-                      </div>
-                      <button class="btn btn-success" onclick="learnQA()">Q&A 학습 저장</button>
-                      <div id="learn-qa-result" class="mt-2"></div>
-                    </div>
-                    
-                    <!-- 예제 학습 탭 -->
-                    <div class="tab-pane fade" id="example-learn">
-                      <div class="mb-3">
-                        <label for="learn-user" class="form-label" style="color: #212529 !important;">사용자 메시지</label>
-                        <input type="text" class="form-control" id="learn-user" placeholder="예: Python으로 파일 읽는 코드 작성해줘" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
-                      </div>
-                      <div class="mb-3">
-                        <label for="learn-assistant" class="form-label" style="color: #212529 !important;">조수 응답</label>
-                        <textarea class="form-control" id="learn-assistant" rows="5" placeholder="조수의 응답을 입력하세요." style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
-                      </div>
-                      <button class="btn btn-success" onclick="learnExample()">예제 학습 저장</button>
-                      <div id="learn-example-result" class="mt-2"></div>
-                    </div>
-                    
-                    <!-- 피드백 탭 -->
-                    <div class="tab-pane fade" id="feedback-learn">
-                      <div class="mb-3">
-                        <label for="feedback-user" class="form-label" style="color: #212529 !important;">사용자 메시지</label>
-                        <input type="text" class="form-control" id="feedback-user" placeholder="사용자가 물어본 내용" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
-                      </div>
-                      <div class="mb-3">
-                        <label for="feedback-assistant" class="form-label" style="color: #212529 !important;">조수 응답</label>
-                        <textarea class="form-control" id="feedback-assistant" rows="3" placeholder="조수가 답한 내용" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
-                      </div>
-                      <div class="mb-3">
-                        <label class="form-label" style="color: #212529 !important;">피드백</label>
-                        <select class="form-select" id="feedback-type" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;">
-                          <option value="good">좋음</option>
-                          <option value="bad">나쁨</option>
-                          <option value="improve">개선 필요</option>
-                        </select>
-                      </div>
-                      <div class="mb-3">
-                        <label for="feedback-improvement" class="form-label" style="color: #212529 !important;">개선 제안 (선택사항)</label>
-                        <textarea class="form-control" id="feedback-improvement" rows="3" placeholder="더 나은 답변을 제안해주세요" style="background-color: #ffffff; color: #212529; border: 1px solid #dee2e6;"></textarea>
-                      </div>
-                      <button class="btn btn-success" onclick="submitFeedback()">피드백 제출</button>
-                      <div id="feedback-result" class="mt-2"></div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
 
       <!-- AI TTS 탭 -->
@@ -497,7 +297,6 @@
       <div class="quick-actions" id="quickActions">
         <button class="quick-action-btn" onclick="scrollToSection('download')">⬇️ Download</button>
         <button class="quick-action-btn" onclick="scrollToSection('tools')">🎬 Video Tools</button>
-        <button class="quick-action-btn" onclick="scrollToSection('survey')">🤖 AI Survey</button>
       </div>
       <button class="fab-button" id="fabMenu" onclick="toggleQuickActions()">☰</button>
     </div>
@@ -507,228 +306,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-      // AI API 사용 체크박스 변경 시 API 키 입력 필드 표시/숨김
-      document.getElementById('use_api').addEventListener('change', function() {
-        document.getElementById('api_key_group').style.display = this.checked ? 'block' : 'none';
-      });
-
-      // 설문조사 분석
-      document.getElementById('analyze_survey_btn').addEventListener('click', async function() {
-        const url = document.getElementById('survey_url').value;
-        if (!url) {
-          alert('URL을 입력하세요.');
-          return;
-        }
-
-        const loadingDiv = document.getElementById('survey_loading');
-        const resultsDiv = document.getElementById('survey_results');
-        const questionsList = document.getElementById('survey_questions_list');
-        
-        loadingDiv.style.display = 'block';
-        resultsDiv.style.display = 'none';
-        questionsList.innerHTML = '';
-
-        try {
-          const response = await fetch('/survey/analyze', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ url: url })
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          let data;
-          try {
-            data = await response.json();
-          } catch (jsonErr) {
-            console.error('JSON 파싱 오류:', jsonErr);
-            const text = await response.text();
-            console.error('응답 텍스트:', text);
-            alert('서버 응답을 파싱할 수 없습니다: ' + jsonErr.message);
-            return;
-          }
-
-          if (!data) {
-            alert('서버에서 데이터를 받지 못했습니다.');
-            return;
-          }
-
-          if (data.error) {
-            alert('오류: ' + data.error);
-          } else {
-            let html = `<div class="alert alert-success">총 ${data.total_questions || 0}개의 질문을 찾았습니다.</div>`;
-            html += '<div class="list-group">';
-            
-            if (data.questions && Array.isArray(data.questions) && data.questions.length > 0) {
-              for (let idx = 0; idx < data.questions.length; idx++) {
-                const q = data.questions[idx];
-                if (!q) continue;
-                html += `<div class="list-group-item">`;
-                html += `<h6>질문 ${idx + 1} (${q.type || 'unknown'}): ${q.question || '질문 없음'}</h6>`;
-                if (q.options && Array.isArray(q.options) && q.options.length > 0) {
-                  html += `<ul class="mb-0">`;
-                  for (let optIdx = 0; optIdx < q.options.length; optIdx++) {
-                    const opt = q.options[optIdx];
-                    if (!opt) continue;
-                    // opt가 문자열일 수도 있고 객체일 수도 있음
-                    let optText = '옵션';
-                    if (typeof opt === 'string') {
-                      optText = opt;
-                    } else if (opt && typeof opt === 'object') {
-                      optText = opt.label || opt.value || '옵션';
-                    }
-                    html += `<li>${optIdx + 1}. ${optText}</li>`;
-                  }
-                  html += `</ul>`;
-                } else if (q.inputs && Array.isArray(q.inputs) && q.inputs.length > 0) {
-                  html += `<p class="mb-0 text-muted">텍스트 입력 필드: ${q.inputs.length}개</p>`;
-                } else {
-                  html += `<p class="mb-0 text-muted">선택지 없음</p>`;
-                }
-                html += `</div>`;
-              }
-            } else {
-              html += `<div class="list-group-item">질문을 찾을 수 없습니다.</div>`;
-            }
-            
-            html += '</div>';
-            questionsList.innerHTML = html;
-            resultsDiv.style.display = 'block';
-            // 페이지네이션 모드가 아니면 분석 후 버튼 활성화
-            if (!document.getElementById('paginated_mode').checked) {
-              document.getElementById('fill_survey_btn').disabled = false;
-            }
-          }
-        } catch (error) {
-          alert('오류 발생: ' + error.message);
-        } finally {
-          loadingDiv.style.display = 'none';
-        }
-      });
-
-      // 설문조사 자동 작성
-      document.getElementById('fill_survey_btn').addEventListener('click', async function() {
-        const url = document.getElementById('survey_url').value;
-        if (!url) {
-          alert('URL을 입력하세요.');
-          return;
-        }
-
-        const useAPI = document.getElementById('use_api').checked;
-        const apiProvider = document.getElementById('api_provider').value;
-        const apiKey = document.getElementById('api_key').value;
-        const headless = document.getElementById('headless_mode').checked;
-        const autoSubmit = document.getElementById('auto_submit').checked;
-        const paginated = document.getElementById('paginated_mode').checked;
-        const browserType = document.getElementById('browser_type').value;
-
-        const loadingDiv = document.getElementById('survey_loading');
-        const resultsDiv = document.getElementById('survey_fill_results');
-        const fillResultsList = document.getElementById('fill_results_list');
-        
-        loadingDiv.style.display = 'block';
-        resultsDiv.style.display = 'none';
-        fillResultsList.innerHTML = '';
-
-        try {
-          const response = await fetch('/survey/fill', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              url: url,
-              use_api: useAPI,
-              api_provider: apiProvider,
-              api_key: apiKey || undefined,
-              headless: headless,
-              auto_submit: autoSubmit,
-              paginated: paginated,
-              browser_type: browserType
-            })
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          let data;
-          try {
-            data = await response.json();
-          } catch (jsonErr) {
-            console.error('JSON 파싱 오류:', jsonErr);
-            const text = await response.text();
-            console.error('응답 텍스트:', text);
-            alert('서버 응답을 파싱할 수 없습니다: ' + jsonErr.message);
-            return;
-          }
-
-          if (!data) {
-            alert('서버에서 데이터를 받지 못했습니다.');
-            return;
-          }
-
-          if (data.error) {
-            alert('오류: ' + data.error);
-          } else {
-            try {
-              let html = `<div class="alert alert-success">`;
-              if (data.mode === 'paginated') {
-                html += `설문조사 자동 작성이 완료되었습니다. (페이지네이션 모드)`;
-              } else {
-                html += `설문조사 자동 작성이 완료되었습니다. (단일 페이지 모드)`;
-              }
-              html += `</div>`;
-              
-              // results가 없어도 오류 없이 처리
-              if (data && data.results && Array.isArray(data.results) && data.results.length > 0) {
-                try {
-                  html += '<div class="list-group mt-3">';
-                  for (let idx = 0; idx < data.results.length; idx++) {
-                    const result = data.results[idx];
-                    if (!result) continue; // null 체크
-                    try {
-                      const statusClass = (result.status === 'success') ? 'success' : 'danger';
-                      html += `<div class="list-group-item list-group-item-${statusClass}">`;
-                      if (result.page) {
-                        html += `<small class="text-muted">페이지 ${result.page} - </small>`;
-                      }
-                      html += `<h6>질문 ${idx + 1}: ${result.question || '질문 없음'}</h6>`;
-                      html += `<p class="mb-0">답변: ${Array.isArray(result.answer) ? result.answer.join(', ') : (result.answer || '답변 없음')}</p>`;
-                      if (result.error) {
-                        html += `<small class="text-danger">오류: ${result.error}</small>`;
-                      }
-                      html += `</div>`;
-                    } catch (resultErr) {
-                      console.error('결과 항목 처리 오류:', resultErr);
-                    }
-                  }
-                  html += '</div>';
-                } catch (forEachErr) {
-                  console.error('results forEach 오류:', forEachErr);
-                  html += `<p class="mt-3 text-danger">결과 처리 중 오류 발생</p>`;
-                }
-              } else {
-                html += `<p class="mt-3 text-muted">상세 결과 정보가 없습니다.</p>`;
-              }
-              
-              fillResultsList.innerHTML = html;
-              resultsDiv.style.display = 'block';
-            } catch (err) {
-              console.error('HTML 생성 오류:', err);
-              alert('결과 표시 중 오류가 발생했습니다: ' + err.message);
-            }
-          }
-        } catch (error) {
-          alert('오류 발생: ' + error.message);
-        } finally {
-          loadingDiv.style.display = 'none';
-        }
-      });
 
       // Quick Actions Menu Toggle
       function toggleQuickActions() {
@@ -791,101 +368,118 @@
         });
       });
 
-      // 챗봇 기능
-      let chatbotHistory = [];
-
-      function sendChatbotMessage() {
-        const input = document.getElementById('chatbot-input');
-        const message = input.value.trim();
-        
-        if (!message) return;
-        
-        // 사용자 메시지 표시
-        addChatbotMessage(message, 'user');
-        input.value = '';
-        
-        // 로딩 표시
-        const loadingId = addChatbotMessage('처리 중...', 'bot', true);
-        
-        // API 호출
-        fetch('/chatbot', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            message: message,
-            history: chatbotHistory
-          })
-        })
-        .then(response => response.json())
-        .then(data => {
-          // 로딩 메시지 제거
-          const loadingElement = document.getElementById(loadingId);
-          if (loadingElement) {
-            loadingElement.remove();
-          }
+      // 동영상 분석 폼 제출
+      const analyzeForm = document.getElementById('analyze-video-form');
+      if (analyzeForm) {
+        analyzeForm.addEventListener('submit', async function(e) {
+          e.preventDefault();
           
-          if (data.success) {
-            addChatbotMessage(data.response, 'bot');
-            // 히스토리 업데이트
-            chatbotHistory.push({role: 'user', content: message});
-            chatbotHistory.push({role: 'assistant', content: data.response});
-            // 최근 20개만 유지
-            if (chatbotHistory.length > 20) {
-              chatbotHistory = chatbotHistory.slice(-20);
+          const formData = new FormData(this);
+          const loadingSpan = document.getElementById('analyze-loading');
+          const textSpan = document.getElementById('analyze-text');
+          const resultDiv = document.getElementById('analysis-result');
+          const contentDiv = document.getElementById('analysis-content');
+          
+          if (loadingSpan) loadingSpan.style.display = 'inline';
+          if (textSpan) textSpan.style.display = 'none';
+          if (resultDiv) resultDiv.style.display = 'none';
+          
+          try {
+            // FormData에 ajax 플래그 추가
+            formData.append('ajax', 'true');
+            
+            // URL에 ajax 파라미터 추가하여 확실하게 AJAX 요청임을 표시
+            const response = await fetch('/analyze_video?ajax=true', {
+              method: 'POST',
+              headers: {
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+              },
+              body: formData
+            });
+            
+            // 응답을 먼저 텍스트로 읽기
+            const responseText = await response.text();
+            
+            // JSON인지 확인 (첫 문자가 '{' 또는 '['인지 확인)
+            let data;
+            try {
+              if (responseText.trim().startsWith('{') || responseText.trim().startsWith('[')) {
+                data = JSON.parse(responseText);
+              } else {
+                // HTML 응답인 경우
+                console.error('서버가 HTML을 반환했습니다:', responseText.substring(0, 500));
+                throw new Error(`서버가 JSON 대신 HTML을 반환했습니다. 응답 시작: ${responseText.substring(0, 100)}`);
+              }
+            } catch (parseError) {
+              if (parseError instanceof SyntaxError) {
+                console.error('JSON 파싱 오류:', parseError);
+                console.error('응답 내용:', responseText.substring(0, 500));
+                throw new Error(`JSON 파싱 실패: ${parseError.message}. 응답: ${responseText.substring(0, 200)}`);
+              } else {
+                throw parseError;
+              }
             }
-          } else {
-            addChatbotMessage('오류: ' + (data.error || '알 수 없는 오류'), 'bot');
+            
+            // 응답 상태 확인
+            if (!response.ok) {
+              throw new Error(`서버 오류 (${response.status}): ${data.error || '알 수 없는 오류'}`);
+            }
+            
+            if (data.success) {
+              const result = data.result;
+              let html = `<p><strong>동영상:</strong> ${escapeHtml(result.video_filename)}</p>`;
+              
+              if (result.duration) {
+                const minutes = Math.floor(result.duration / 60);
+                const seconds = Math.floor(result.duration % 60);
+                html += `<p><strong>길이:</strong> ${minutes}분 ${seconds}초</p>`;
+              }
+              
+              if (result.transcription_summary) {
+                html += `<p><strong>음성 내용 요약:</strong></p>`;
+                html += `<div class="p-2 bg-light rounded mb-2">${escapeHtml(result.transcription_summary)}</div>`;
+              }
+              
+              if (result.transcription) {
+                html += `<p><strong>음성 인식 전체 결과:</strong></p>`;
+                html += `<div class="p-2 bg-light rounded mb-2" style="max-height: 200px; overflow-y: auto;">${escapeHtml(result.transcription)}</div>`;
+              }
+              
+              if (result.summary) {
+                html += `<p><strong>종합 요약:</strong></p>`;
+                html += `<div class="p-2 bg-light rounded mb-2">${escapeHtml(result.summary)}</div>`;
+              }
+              
+              if (result.frame_descriptions && result.frame_descriptions.length > 0) {
+                html += `<p><strong>프레임 분석 결과:</strong></p>`;
+                html += `<ul class="mb-2">`;
+                result.frame_descriptions.forEach((desc, idx) => {
+                  html += `<li>${escapeHtml(desc)}</li>`;
+                });
+                html += `</ul>`;
+              }
+              
+              if (result.key_frames && result.key_frames.length > 0) {
+                html += `<p><strong>주요 프레임:</strong> ${result.key_frames.length}개 추출됨</p>`;
+              }
+              
+              html += `<p class="text-muted small mt-2">분석 결과 파일: ${escapeHtml(data.result_file)}</p>`;
+              
+              if (contentDiv) contentDiv.innerHTML = html;
+              if (resultDiv) resultDiv.style.display = 'block';
+            } else {
+              if (contentDiv) contentDiv.innerHTML = `<div class="alert alert-danger">오류: ${escapeHtml(data.error || '알 수 없는 오류')}</div>`;
+              if (resultDiv) resultDiv.style.display = 'block';
+            }
+          } catch (error) {
+            if (contentDiv) contentDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${escapeHtml(error.message)}</div>`;
+            if (resultDiv) resultDiv.style.display = 'block';
+          } finally {
+            if (loadingSpan) loadingSpan.style.display = 'none';
+            if (textSpan) textSpan.style.display = 'inline';
           }
-        })
-        .catch(error => {
-          const loadingElement = document.getElementById(loadingId);
-          if (loadingElement) {
-            loadingElement.remove();
-          }
-          addChatbotMessage('오류 발생: ' + error.message, 'bot');
         });
-      }
-
-      function addChatbotMessage(message, sender, isLoading = false) {
-        const messagesDiv = document.getElementById('chatbot-messages');
-        const messageId = 'msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-        
-        const messageDiv = document.createElement('div');
-        messageDiv.id = messageId;
-        messageDiv.className = `message ${sender}-message mb-3`;
-        
-        if (sender === 'user') {
-          messageDiv.innerHTML = `
-            <div class="d-flex align-items-start justify-content-end">
-              <div>
-                <div class="message-content bg-primary text-white p-3 rounded shadow-sm" style="max-width: 70%; margin-left: auto;">
-                  ${escapeHtml(message)}
-                </div>
-                <small class="text-muted d-block text-end">나</small>
-              </div>
-              <div class="ms-2">👤</div>
-            </div>
-          `;
-        } else {
-          messageDiv.innerHTML = `
-            <div class="d-flex align-items-start">
-              <div class="me-2">🤖</div>
-              <div>
-                <div class="message-content bg-white p-3 rounded shadow-sm" style="max-width: 70%; color: #212529 !important;">
-                  ${isLoading ? '<span class="spinner-border spinner-border-sm me-2"></span>' : ''}${escapeHtml(message)}
-                </div>
-                <small class="text-muted">시스템</small>
-              </div>
-            </div>
-          `;
-        }
-        
-        messagesDiv.appendChild(messageDiv);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        
-        return messageId;
       }
 
       function escapeHtml(text) {
@@ -894,125 +488,6 @@
         return div.innerHTML;
       }
 
-      // Q&A 학습 함수
-      async function learnQA() {
-        const question = document.getElementById('learn-question').value.trim();
-        const answer = document.getElementById('learn-answer').value.trim();
-        const resultDiv = document.getElementById('learn-qa-result');
-        
-        if (!question || !answer) {
-          resultDiv.innerHTML = '<div class="alert alert-danger">질문과 답변을 모두 입력해주세요.</div>';
-          return;
-        }
-        
-        try {
-          const response = await fetch('/chatbot/learn/qa', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({question: question, answer: answer})
-          });
-          
-          const data = await response.json();
-          if (data.success) {
-            resultDiv.innerHTML = `<div class="alert alert-success">✅ 학습 완료! 총 ${data.total_qa}개의 Q&A가 저장되었습니다.</div>`;
-            document.getElementById('learn-question').value = '';
-            document.getElementById('learn-answer').value = '';
-          } else {
-            resultDiv.innerHTML = `<div class="alert alert-danger">오류: ${data.error}</div>`;
-          }
-        } catch (error) {
-          resultDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${error.message}</div>`;
-        }
-      }
-
-      // 예제 학습 함수
-      async function learnExample() {
-        const user = document.getElementById('learn-user').value.trim();
-        const assistant = document.getElementById('learn-assistant').value.trim();
-        const resultDiv = document.getElementById('learn-example-result');
-        
-        if (!user || !assistant) {
-          resultDiv.innerHTML = '<div class="alert alert-danger">사용자 메시지와 조수 응답을 모두 입력해주세요.</div>';
-          return;
-        }
-        
-        try {
-          const response = await fetch('/chatbot/learn/example', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({user: user, assistant: assistant})
-          });
-          
-          const data = await response.json();
-          if (data.success) {
-            resultDiv.innerHTML = `<div class="alert alert-success">✅ 학습 완료! 총 ${data.total_examples}개의 예제가 저장되었습니다.</div>`;
-            document.getElementById('learn-user').value = '';
-            document.getElementById('learn-assistant').value = '';
-          } else {
-            resultDiv.innerHTML = `<div class="alert alert-danger">오류: ${data.error}</div>`;
-          }
-        } catch (error) {
-          resultDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${error.message}</div>`;
-        }
-      }
-
-      // 피드백 제출 함수
-      async function submitFeedback() {
-        const userMessage = document.getElementById('feedback-user').value.trim();
-        const assistantResponse = document.getElementById('feedback-assistant').value.trim();
-        const feedback = document.getElementById('feedback-type').value;
-        const improvement = document.getElementById('feedback-improvement').value.trim();
-        const resultDiv = document.getElementById('feedback-result');
-        
-        if (!userMessage || !assistantResponse) {
-          resultDiv.innerHTML = '<div class="alert alert-danger">사용자 메시지와 조수 응답을 모두 입력해주세요.</div>';
-          return;
-        }
-        
-        try {
-          const response = await fetch('/chatbot/learn/feedback', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              user_message: userMessage,
-              assistant_response: assistantResponse,
-              feedback: feedback,
-              improvement: improvement
-            })
-          });
-          
-          const data = await response.json();
-          if (data.success) {
-            resultDiv.innerHTML = '<div class="alert alert-success">✅ 피드백이 저장되었습니다. 감사합니다!</div>';
-            document.getElementById('feedback-user').value = '';
-            document.getElementById('feedback-assistant').value = '';
-            document.getElementById('feedback-improvement').value = '';
-          } else {
-            resultDiv.innerHTML = `<div class="alert alert-danger">오류: ${data.error}</div>`;
-          }
-        } catch (error) {
-          resultDiv.innerHTML = `<div class="alert alert-danger">오류 발생: ${error.message}</div>`;
-        }
-      }
-
-      // 학습 통계 표시 함수
-      async function showLearningStats() {
-        try {
-          const response = await fetch('/chatbot/learn/stats');
-          const data = await response.json();
-          
-          if (data.success) {
-            const message = `📊 학습 통계\n\n` +
-              `Q&A 쌍: ${data.knowledge_base.qa_pairs}개\n` +
-              `예제 대화: ${data.knowledge_base.examples}개\n` +
-              `대화 기록: ${data.learning_data.conversations}개\n` +
-              `피드백: ${data.learning_data.feedback}개`;
-            alert(message);
-          }
-        } catch (error) {
-          alert('통계를 불러오는 중 오류가 발생했습니다: ' + error.message);
-        }
-      }
     </script>
   </body>
 </html> 

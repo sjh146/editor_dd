@@ -1,74 +1,25 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-import matplotlib
-matplotlib.use('Agg')
 import subprocess
 import yt_dlp
 from flask import Flask, flash, redirect, render_template, request, send_from_directory, url_for, jsonify
-from typing import cast
 from werkzeug.utils import secure_filename
 import json
 import re
 from datetime import datetime
 
 # Audio processing imports
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
-import torchaudio
-import librosa
-import librosa.display
-import matplotlib.pyplot as plt
 import numpy as np
-try:
-    import soundfile as sf
-    SOUNDFILE_AVAILABLE = True
-except ImportError:
-    SOUNDFILE_AVAILABLE = False
+import soundfile as sf
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a_super_secret_key'
 DOWNLOAD_FOLDER = 'downloads'
 app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
-KNOWLEDGE_BASE_FILE = 'chatbot_knowledge.json'
-LEARNING_DATA_FILE = 'chatbot_learning_data.json'
 
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
-
-# 학습 데이터 및 지식 베이스 로딩
-def load_knowledge_base():
-    """지식 베이스 로딩"""
-    if os.path.exists(KNOWLEDGE_BASE_FILE):
-        try:
-            with open(KNOWLEDGE_BASE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {'qa_pairs': [], 'examples': []}
-    return {'qa_pairs': [], 'examples': []}
-
-def save_knowledge_base(kb_data):
-    """지식 베이스 저장"""
-    with open(KNOWLEDGE_BASE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(kb_data, f, ensure_ascii=False, indent=2)
-
-def load_learning_data():
-    """학습 데이터 로딩"""
-    if os.path.exists(LEARNING_DATA_FILE):
-        try:
-            with open(LEARNING_DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {'conversations': [], 'feedback': []}
-    return {'conversations': [], 'feedback': []}
-
-def save_learning_data(learning_data):
-    """학습 데이터 저장"""
-    with open(LEARNING_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(learning_data, f, ensure_ascii=False, indent=2)
-
-# 전역 변수로 지식 베이스와 학습 데이터 로드
-knowledge_base = load_knowledge_base()
-learning_data = load_learning_data()
 
 def check_ffmpeg_available():
     """ffmpeg가 설치되어 있는지 확인"""
@@ -78,78 +29,36 @@ def check_ffmpeg_available():
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
-# 챗봇 모델 로딩 (최초 1회만)
-chatbot_tokenizer = None
-chatbot_model = None
-
 # TTS 모델 로딩 (최초 1회만)
 tts_processor = None
 tts_model = None
-tts_vocoder = None
-tts_model_type = None  # 'speecht5' or 'bark'
+tts_model_type = None  # 'bark'
 korean_tts_available = False
+
+# 동영상 분석 모델 로딩 (최초 1회만)
+whisper_model = None
+whisper_processor = None
+blip_processor = None
+blip_model = None
+summarizer_pipeline = None
 
 # 한국어 TTS 라이브러리 확인
 try:
-    from TTS.api import TTS
+    import gtts
     korean_tts_available = True
 except ImportError:
-    try:
-        import gtts
-        korean_tts_available = True
-    except ImportError:
-        korean_tts_available = False
-
-def load_chatbot_model():
-    """한국어 챗봇 모델 로딩"""
-    global chatbot_tokenizer, chatbot_model
-    if chatbot_tokenizer is None or chatbot_model is None:
-        model_candidates = ["skt/kogpt2-base-v2", "gpt2"]
-        
-        for model_name in model_candidates:
-            try:
-                chatbot_tokenizer = AutoTokenizer.from_pretrained(model_name)
-                use_cuda = torch.cuda.is_available()
-                
-                if use_cuda:
-                    try:
-                        chatbot_model = AutoModelForCausalLM.from_pretrained(
-                            model_name, torch_dtype=torch.float16,
-                            device_map="auto", low_cpu_mem_usage=True
-                        )
-                    except Exception:
-                        chatbot_model = AutoModelForCausalLM.from_pretrained(
-                            model_name, torch_dtype=torch.float16
-                        )
-                        chatbot_model = chatbot_model.to("cuda").eval()
-                else:
-                    chatbot_model = AutoModelForCausalLM.from_pretrained(
-                        model_name, torch_dtype=torch.float32
-                    ).to("cpu").eval()
-                
-                if chatbot_tokenizer.pad_token is None:
-                    chatbot_tokenizer.pad_token = chatbot_tokenizer.eos_token
-                
-                print(f"챗봇 모델 로딩 완료: {model_name} ({'GPU' if use_cuda else 'CPU'} 모드)")
-                break
-            except Exception as e:
-                print(f"모델 {model_name} 로딩 실패: {e}")
-                chatbot_tokenizer = None
-                chatbot_model = None
-    
-    return chatbot_tokenizer, chatbot_model
+    korean_tts_available = False
 
 def load_tts_model():
     """TTS 모델 로딩 (영어용 - Bark만 사용)"""
-    global tts_processor, tts_model, tts_vocoder, tts_model_type
+    global tts_processor, tts_model, tts_model_type
     
     if tts_model_type == 'bark' and tts_model is not None:
-        return tts_processor, tts_model, tts_vocoder
+        return tts_processor, tts_model
     
     # 기존 모델 정리
     tts_processor = None
     tts_model = None
-    tts_vocoder = None
     
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
@@ -158,15 +67,10 @@ def load_tts_model():
         print("Bark TTS 모델 로딩 중... (고품질)")
         from transformers import BarkModel, AutoProcessor
         
-        model_name = "suno/bark-small"  # 또는 "suno/bark" (더 큰 모델, 더 좋은 품질)
+        model_name = "suno/bark-small"
         tts_processor = AutoProcessor.from_pretrained(model_name)
         tts_model = BarkModel.from_pretrained(model_name)
-        
-        if use_cuda:
-            tts_model = tts_model.to(device)
-        else:
-            tts_model = tts_model.to(device)
-        
+        tts_model = tts_model.to(device)
         tts_model.eval()
         tts_model_type = 'bark'
         print(f"Bark TTS 모델 로딩 완료 ({'GPU' if use_cuda else 'CPU'} 모드)")
@@ -176,10 +80,9 @@ def load_tts_model():
         traceback.print_exc()
         tts_processor = None
         tts_model = None
-        tts_vocoder = None
         tts_model_type = None
     
-    return tts_processor, tts_model, tts_vocoder
+    return tts_processor, tts_model
 
 def detect_language(text):
     """텍스트 언어 감지 (간단한 휴리스틱)"""
@@ -232,11 +135,636 @@ def get_tts_files():
     files = get_downloaded_files()
     return [f for f in files if f.startswith('tts_') and (f.endswith('.wav') or f.endswith('.mp3'))]
 
+def get_video_files():
+    """동영상 파일만 필터링"""
+    files = get_downloaded_files()
+    return [f for f in files if f.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.mpg', '.mpeg'))]
+
+def load_whisper_model():
+    """Whisper 모델 로딩 (음성 인식용)"""
+    global whisper_model, whisper_processor
+    
+    if whisper_model is not None:
+        return whisper_model, whisper_processor
+    
+    try:
+        print("Whisper 모델 로딩 중...")
+        try:
+            # transformers의 Whisper 사용 시도
+            from transformers import WhisperProcessor, WhisperForConditionalGeneration
+            model_name = "openai/whisper-small"  # 또는 "openai/whisper-base", "openai/whisper-medium"
+            whisper_processor = WhisperProcessor.from_pretrained(model_name)
+            whisper_model = WhisperForConditionalGeneration.from_pretrained(model_name)
+            
+            use_cuda = torch.cuda.is_available()
+            device = "cuda" if use_cuda else "cpu"
+            whisper_model = whisper_model.to(device)
+            whisper_model.eval()
+            
+            print(f"Whisper 모델 로딩 완료 ({'GPU' if use_cuda else 'CPU'} 모드)")
+        except ImportError:
+            # openai-whisper 패키지 사용 시도
+            try:
+                import whisper
+                whisper_model = whisper.load_model("small")  # base, small, medium, large
+                whisper_processor = None
+                print("Whisper 모델 로딩 완료 (openai-whisper)")
+            except ImportError:
+                print("Whisper 라이브러리를 찾을 수 없습니다. transformers 또는 openai-whisper를 설치하세요.")
+                whisper_model = None
+                whisper_processor = None
+    except Exception as e:
+        print(f"Whisper 모델 로딩 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        whisper_model = None
+        whisper_processor = None
+    
+    return whisper_model, whisper_processor
+
+def extract_audio_from_video(video_path, output_audio_path):
+    """동영상에서 오디오 추출"""
+    try:
+        command = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+            output_audio_path
+        ]
+        subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        return True
+    except Exception as e:
+        print(f"오디오 추출 실패: {e}")
+        return False
+
+def transcribe_audio(audio_path):
+    """오디오를 텍스트로 변환 (전체 오디오 인식)"""
+    model, processor = load_whisper_model()
+    
+    if model is None:
+        return None, "Whisper 모델을 로드할 수 없습니다."
+    
+    try:
+        if processor is not None:
+            # transformers Whisper 사용
+            import librosa
+            
+            # 오디오 길이 확인
+            audio, sr = librosa.load(audio_path, sr=16000)
+            audio_duration = len(audio) / sr
+            print(f"오디오 길이: {audio_duration:.2f}초")
+            
+            # 긴 오디오는 청크로 나눠서 처리 (30초 단위)
+            chunk_duration = 30.0  # 30초 청크
+            chunk_samples = int(chunk_duration * sr)
+            
+            all_transcriptions = []
+            
+            if len(audio) > chunk_samples:
+                # 긴 오디오: 청크로 나눠서 처리
+                print(f"긴 오디오 감지: {len(audio) / sr:.2f}초, 청크 단위로 처리합니다.")
+                num_chunks = int(np.ceil(len(audio) / chunk_samples))
+                
+                for i in range(num_chunks):
+                    start_idx = i * chunk_samples
+                    end_idx = min((i + 1) * chunk_samples, len(audio))
+                    audio_chunk = audio[start_idx:end_idx]
+                    
+                    print(f"청크 {i+1}/{num_chunks} 처리 중... ({start_idx/sr:.1f}초 ~ {end_idx/sr:.1f}초)")
+                    
+                    inputs = processor(audio_chunk, sampling_rate=16000, return_tensors="pt")
+                    device = next(model.parameters()).device
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    
+                    with torch.no_grad():
+                        # max_length 제한 제거 또는 충분히 크게 설정
+                        generated_ids = model.generate(**inputs, max_length=512, max_new_tokens=256)
+                    
+                    chunk_transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                    if chunk_transcription.strip():
+                        all_transcriptions.append(chunk_transcription.strip())
+                
+                transcription = " ".join(all_transcriptions)
+            else:
+                # 짧은 오디오: 전체 처리
+                inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+                device = next(model.parameters()).device
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    # max_length 제한 제거 또는 충분히 크게 설정
+                    generated_ids = model.generate(**inputs, max_length=512, max_new_tokens=256)
+                
+                transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            
+            print(f"음성 인식 완료: {len(transcription)}자")
+            return transcription, None
+        else:
+            # openai-whisper 사용 (더 나은 긴 오디오 처리)
+            print("openai-whisper로 전체 오디오 인식 중...")
+            result = model.transcribe(audio_path, language=None, verbose=False)  # 자동 언어 감지
+            transcription = result["text"]
+            print(f"음성 인식 완료: {len(transcription)}자")
+            return transcription, None
+    except Exception as e:
+        error_msg = str(e)
+        print(f"음성 인식 오류: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return None, error_msg
+
+def extract_key_frames(video_path, num_frames=5):
+    """동영상에서 주요 프레임 추출"""
+    try:
+        # 동영상 길이 확인
+        probe_cmd = [
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        duration = float(result.stdout.strip())
+        
+        # 균등하게 프레임 추출
+        frame_times = []
+        if duration > 0:
+            interval = duration / (num_frames + 1)
+            for i in range(1, num_frames + 1):
+                frame_times.append(i * interval)
+        
+        frames = []
+        temp_dir = os.path.join(app.config['DOWNLOAD_FOLDER'], 'temp_frames')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        for idx, time in enumerate(frame_times):
+            frame_path = os.path.join(temp_dir, f"frame_{idx}.jpg")
+            command = [
+                'ffmpeg', '-y', '-ss', str(time),
+                '-i', video_path, '-vframes', '1',
+                '-q:v', '2', frame_path
+            ]
+            try:
+                subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+                if os.path.exists(frame_path):
+                    frames.append(frame_path)
+            except:
+                continue
+        
+        return frames
+    except Exception as e:
+        print(f"프레임 추출 오류: {e}")
+        return []
+
+def load_blip_model():
+    """BLIP 비전 모델 로딩 (이미지 분석용)"""
+    global blip_processor, blip_model
+    
+    if blip_model is not None:
+        return blip_processor, blip_model
+    
+    try:
+        print("BLIP 비전 모델 로딩 중...")
+        from transformers import BlipProcessor, BlipForConditionalGeneration
+        from PIL import Image
+        
+        model_name = "Salesforce/blip-image-captioning-base"  # 또는 "Salesforce/blip-image-captioning-large"
+        blip_processor = BlipProcessor.from_pretrained(model_name)
+        blip_model = BlipForConditionalGeneration.from_pretrained(model_name)
+        
+        use_cuda = torch.cuda.is_available()
+        device = "cuda" if use_cuda else "cpu"
+        blip_model = blip_model.to(device)
+        blip_model.eval()
+        
+        print(f"BLIP 모델 로딩 완료 ({'GPU' if use_cuda else 'CPU'} 모드)")
+    except Exception as e:
+        print(f"BLIP 모델 로딩 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        blip_processor = None
+        blip_model = None
+    
+    return blip_processor, blip_model
+
+def analyze_frame_with_blip(image_path):
+    """BLIP 모델을 사용하여 프레임 이미지 분석 및 설명 생성"""
+    processor, model = load_blip_model()
+    
+    if model is None or processor is None:
+        return None
+    
+    try:
+        from PIL import Image
+        
+        # 이미지 로드
+        image = Image.open(image_path).convert('RGB')
+        
+        # BLIP으로 이미지 설명 생성
+        inputs = processor(image, return_tensors="pt")
+        
+        use_cuda = torch.cuda.is_available()
+        device = "cuda" if use_cuda else "cpu"
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs, 
+                max_length=50, 
+                num_beams=3,
+                repetition_penalty=1.5  # 반복 억제
+            )
+        
+        description = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        
+        # 반복 체크 및 제거
+        if has_repetition(description):
+            # 반복이 있으면 간단하게 처리
+            words = description.split()
+            unique_words = []
+            prev_word = None
+            for word in words:
+                if word != prev_word:
+                    unique_words.append(word)
+                prev_word = word
+            description = " ".join(unique_words[:20])  # 최대 20단어로 제한
+        
+        return description
+    except Exception as e:
+        print(f"프레임 분석 오류 ({image_path}): {e}")
+        return None
+
+def load_summarizer_model():
+    """텍스트 요약 모델 로딩 (음성 인식 텍스트 요약용)"""
+    global summarizer_pipeline
+    
+    if summarizer_pipeline is not None:
+        return summarizer_pipeline
+    
+    try:
+        print("텍스트 요약 모델 로딩 중...")
+        from transformers import pipeline
+        
+        # 한국어 요약 모델 사용
+        model_name = "gogamza/kobart-base-v2"  # KoBART 기반 한국어 요약 모델
+        
+        summarizer_pipeline = pipeline(
+            "summarization",
+            model=model_name,
+            tokenizer=model_name,
+            device=0 if torch.cuda.is_available() else -1
+        )
+        
+        print(f"요약 모델 로딩 완료 ({'GPU' if torch.cuda.is_available() else 'CPU'} 모드)")
+    except Exception as e:
+        print(f"요약 모델 로딩 실패: {e}")
+        print("간단한 텍스트 요약 방법을 사용합니다.")
+        import traceback
+        traceback.print_exc()
+        summarizer_pipeline = None
+    
+    return summarizer_pipeline
+
+def summarize_transcription(transcription, summary_ratio=0.25):
+    """음성 인식 텍스트를 AI 모델로 요약 (원본의 25% 수준으로 압축)"""
+    if not transcription or len(transcription.strip()) < 50:
+        return transcription
+    
+    text = transcription.strip()
+    original_length = len(text)
+    
+    # 목표 요약 길이 계산 (원본의 25% 정도)
+    target_length = max(50, int(original_length * summary_ratio))
+    max_length = min(target_length + 30, 150)  # 최대 150자
+    min_length = max(30, int(target_length * 0.6))  # 최소 30자 또는 목표의 60%
+    
+    print(f"요약 목표: 원본 {original_length}자 -> {target_length}자 (약 {summary_ratio*100:.0f}%)")
+    
+    try:
+        # 요약 모델 로드
+        summarizer = load_summarizer_model()
+        
+        if summarizer is None:
+            # 모델이 없으면 개선된 간단한 방법 사용
+            sentences = re.split(r'[.!?]\s+', text)
+            target_sentences = max(3, int(len(sentences) * summary_ratio))
+            return generate_improved_summary(text, target_sentences=target_sentences)
+        
+        # 텍스트가 너무 길면 분할하여 요약
+        if len(text) > 1000:
+            # 긴 텍스트를 문장 단위로 분할
+            sentences = re.split(r'[.!?]\s+', text)
+            chunks = []
+            current_chunk = ""
+            
+            for sentence in sentences:
+                if len(current_chunk) + len(sentence) < 1000:
+                    current_chunk += sentence + ". "
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence + ". "
+            
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            
+            # 각 청크를 요약하고 결합
+            summarized_chunks = []
+            chunk_target_length = max(30, int(target_length / len(chunks)))
+            
+            for i, chunk in enumerate(chunks):
+                try:
+                    chunk_max = min(chunk_target_length + 20, 100)
+                    chunk_min = max(20, int(chunk_target_length * 0.6))
+                    
+                    chunk_summary = summarizer(
+                        chunk,
+                        max_length=chunk_max,
+                        min_length=chunk_min,
+                        do_sample=False,
+                        repetition_penalty=2.0,  # 반복 억제 강화
+                        num_beams=5,
+                        length_penalty=0.6  # 더 짧게 만들기
+                    )
+                    if chunk_summary and len(chunk_summary) > 0:
+                        summary_text = chunk_summary[0]['summary_text']
+                        # 반복 체크 및 길이 확인 (원본의 70% 이하로)
+                        if not has_repetition(summary_text) and len(summary_text) < len(chunk) * 0.7:
+                            summarized_chunks.append(summary_text)
+                            print(f"청크 {i+1}/{len(chunks)}: {len(chunk)}자 -> {len(summary_text)}자")
+                        else:
+                            print(f"청크 {i+1} 반복 감지 또는 요약 부족, 개선된 요약 사용")
+                            improved = generate_improved_summary(chunk, target_sentences=3)
+                            summarized_chunks.append(improved)
+                except Exception as e:
+                    print(f"청크 {i+1} 요약 오류: {e}")
+                    summarized_chunks.append(generate_improved_summary(chunk, target_sentences=3))
+            
+            final_summary = " ".join(summarized_chunks)
+            # 최종 결과도 반복 체크 및 길이 확인
+            if has_repetition(final_summary) or len(final_summary) > original_length * 0.6:
+                print(f"최종 요약이 너무 김 ({len(final_summary)}자), 개선된 요약 사용")
+                target_sentences = max(3, int(len(sentences) * summary_ratio))
+                return generate_improved_summary(text, target_sentences=target_sentences)
+            
+            print(f"요약 완료: {original_length}자 -> {len(final_summary)}자 ({len(final_summary)/original_length*100:.1f}%)")
+            return final_summary
+        else:
+            # 짧은 텍스트는 바로 요약
+            try:
+                summary = summarizer(
+                    text,
+                    max_length=max_length,
+                    min_length=min_length,
+                    do_sample=False,
+                    repetition_penalty=2.0,  # 반복 억제 강화
+                    num_beams=5,
+                    length_penalty=0.6  # 더 짧게 만들기
+                )
+                if summary and len(summary) > 0:
+                    summary_text = summary[0]['summary_text']
+                    # 반복 체크 및 길이 확인
+                    if has_repetition(summary_text) or len(summary_text) > original_length * 0.6:
+                        print("반복 감지 또는 요약 부족, 개선된 요약 사용")
+                        sentences = re.split(r'[.!?]\s+', text)
+                        target_sentences = max(3, int(len(sentences) * summary_ratio))
+                        return generate_improved_summary(text, target_sentences=target_sentences)
+                    
+                    print(f"요약 완료: {original_length}자 -> {len(summary_text)}자 ({len(summary_text)/original_length*100:.1f}%)")
+                    return summary_text
+                else:
+                    sentences = re.split(r'[.!?]\s+', text)
+                    target_sentences = max(3, int(len(sentences) * summary_ratio))
+                    return generate_improved_summary(text, target_sentences=target_sentences)
+            except Exception as e:
+                print(f"요약 오류: {e}")
+                sentences = re.split(r'[.!?]\s+', text)
+                target_sentences = max(3, int(len(sentences) * summary_ratio))
+                return generate_improved_summary(text, target_sentences=target_sentences)
+    
+    except Exception as e:
+        print(f"텍스트 요약 실패: {e}")
+        sentences = re.split(r'[.!?]\s+', text)
+        target_sentences = max(3, int(len(sentences) * summary_ratio))
+        return generate_improved_summary(text, target_sentences=target_sentences)
+
+def has_repetition(text, threshold=3):
+    """텍스트에 반복이 있는지 확인"""
+    if not text:
+        return False
+    
+    words = text.split()
+    if len(words) < threshold:
+        return False
+    
+    # 같은 단어가 연속으로 3번 이상 반복되는지 확인
+    for i in range(len(words) - threshold + 1):
+        if len(set(words[i:i+threshold])) == 1:
+            return True
+    
+    # 같은 구문이 반복되는지 확인 (2-3단어)
+    for i in range(len(words) - 4):
+        phrase1 = " ".join(words[i:i+2])
+        phrase2 = " ".join(words[i+2:i+4])
+        if phrase1 == phrase2:
+            return True
+    
+    return False
+
+def generate_improved_summary(text, target_sentences=5):
+    """개선된 간단한 텍스트 요약 (핵심 문장 선택)"""
+    if not text or len(text.strip()) < 50:
+        return text
+    
+    # 문장 분리
+    sentences = re.split(r'[.!?]\s+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if len(sentences) <= target_sentences:
+        return text
+    
+    # 문장 중요도 계산 (길이, 위치, 키워드 포함)
+    scored_sentences = []
+    total_sentences = len(sentences)
+    
+    for idx, sentence in enumerate(sentences):
+        score = 0
+        
+        # 위치 점수 (시작과 끝이 중요)
+        if idx < total_sentences * 0.2:  # 처음 20%
+            score += 2
+        elif idx > total_sentences * 0.8:  # 마지막 20%
+            score += 2
+        elif idx < total_sentences * 0.3:  # 처음 30%
+            score += 1
+        
+        # 길이 점수 (적당히 긴 문장이 중요)
+        if 20 <= len(sentence) <= 100:
+            score += 1
+        elif len(sentence) > 100:
+            score += 0.5
+        
+        # 키워드 점수 (중요한 단어 포함)
+        important_words = ['중요', '핵심', '결론', '요약', '정리', '결과', '발견', '연구', '분석']
+        if any(word in sentence for word in important_words):
+            score += 2
+        
+        scored_sentences.append((score, idx, sentence))
+    
+    # 점수 순으로 정렬
+    scored_sentences.sort(reverse=True)
+    
+    # 상위 문장 선택
+    selected_indices = sorted([idx for _, idx, _ in scored_sentences[:target_sentences]])
+    summary_sentences = [sentences[idx] for idx in selected_indices]
+    
+    summary = '. '.join(summary_sentences)
+    if not summary.endswith(('.', '!', '?')):
+        summary += '.'
+    
+    return summary
+
+def generate_simple_summary(text, max_sentences=3):
+    """간단한 텍스트 요약 (폴백 방법) - generate_improved_summary로 대체"""
+    return generate_improved_summary(text, target_sentences=max_sentences)
+
+def generate_video_summary_from_frames(frame_descriptions, transcription="", transcription_summary=""):
+    """프레임 분석 결과와 음성 인식을 종합하여 동영상 요약 생성"""
+    summary_parts = []
+    
+    # 프레임 설명이 있으면 포함
+    if frame_descriptions:
+        unique_descriptions = []
+        for desc in frame_descriptions:
+            if desc and desc.strip() and desc not in unique_descriptions:
+                unique_descriptions.append(desc.strip())
+        
+        if unique_descriptions:
+            summary_parts.append("주요 장면: " + ", ".join(unique_descriptions[:3]))
+    
+    # 음성 인식 요약 결과가 있으면 포함
+    if transcription_summary and transcription_summary.strip():
+        summary_parts.append(f"내용 요약: {transcription_summary}")
+    elif transcription and transcription.strip():
+        # 요약이 없으면 원본의 첫 부분 사용
+        transcription_clean = transcription.strip()
+        if len(transcription_clean) > 200:
+            transcription_clean = transcription_clean[:200] + "..."
+        summary_parts.append(f"내용: {transcription_clean}")
+    
+    if summary_parts:
+        return " ".join(summary_parts)
+    else:
+        return "동영상 내용을 분석할 수 없습니다."
+
+def analyze_video_content(video_path):
+    """동영상 내용 분석 및 요약 (비전 모델 사용)"""
+    results = {
+        'transcription': '',
+        'summary': '',
+        'key_frames': [],
+        'frame_descriptions': [],
+        'duration': 0,
+        'error': None
+    }
+    
+    try:
+        # 동영상 길이 확인
+        probe_cmd = [
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        if result.returncode == 0:
+            results['duration'] = float(result.stdout.strip())
+        
+        # 주요 프레임 추출 (더 많은 프레임 추출)
+        key_frames = extract_key_frames(video_path, num_frames=5)
+        results['key_frames'] = key_frames
+        
+        # 각 프레임을 BLIP 모델로 분석
+        frame_descriptions = []
+        if key_frames:
+            print(f"프레임 분석 중... ({len(key_frames)}개 프레임)")
+            for frame_path in key_frames:
+                description = analyze_frame_with_blip(frame_path)
+                if description:
+                    frame_descriptions.append(description)
+                    print(f"  - {os.path.basename(frame_path)}: {description}")
+        
+        results['frame_descriptions'] = frame_descriptions
+        
+        # 오디오 추출 및 음성 인식
+        temp_audio_path = os.path.join(app.config['DOWNLOAD_FOLDER'], 'temp_audio.wav')
+        transcription = ""
+        transcription_summary = ""
+        if extract_audio_from_video(video_path, temp_audio_path):
+            transcription, error = transcribe_audio(temp_audio_path)
+            if transcription:
+                results['transcription'] = transcription
+                
+                # 음성 인식 텍스트를 AI 모델로 요약
+                print("음성 인식 텍스트 요약 중...")
+                transcription_summary = summarize_transcription(transcription)
+                results['transcription_summary'] = transcription_summary
+                print(f"요약 결과: {transcription_summary}")
+            else:
+                if error:
+                    print(f"음성 인식 경고: {error}")
+            
+            # 임시 오디오 파일 삭제
+            if os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+        
+        # 비전 모델 분석 결과와 음성 인식 요약을 종합하여 최종 요약 생성
+        summary = generate_video_summary_from_frames(frame_descriptions, transcription, transcription_summary)
+        results['summary'] = summary
+        
+    except Exception as e:
+        results['error'] = str(e)
+        print(f"동영상 분석 오류: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return results
+
+def generate_summary(text, max_sentences=3):
+    """텍스트 요약 생성 (간단한 방법)"""
+    if not text or len(text.strip()) < 50:
+        return text
+    
+    # 문장 분리
+    sentences = re.split(r'[.!?]\s+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if len(sentences) <= max_sentences:
+        return text
+    
+    # 첫 문장과 마지막 문장, 그리고 중간의 긴 문장 선택
+    summary_sentences = []
+    if sentences:
+        summary_sentences.append(sentences[0])
+    
+    # 중간에서 가장 긴 문장 선택
+    if len(sentences) > 2:
+        middle_sentences = sentences[1:-1]
+        if middle_sentences:
+            longest = max(middle_sentences, key=len)
+            summary_sentences.append(longest)
+    
+    # 마지막 문장
+    if len(sentences) > 1:
+        summary_sentences.append(sentences[-1])
+    
+    summary = '. '.join(summary_sentences[:max_sentences])
+    if not summary.endswith(('.', '!', '?')):
+        summary += '.'
+    
+    return summary
+
 @app.route('/')
 def index():
     files = get_downloaded_files()
     tts_files = get_tts_files()
-    return render_template('index.html', files=files, tts_files=tts_files)
+    video_files = get_video_files()
+    return render_template('index.html', files=files, tts_files=tts_files, video_files=video_files)
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -314,7 +842,7 @@ def edit():
         subprocess.run(command, check=True, capture_output=True)
         flash(f'Successfully trimmed video to {output_filename}!', 'success')
     except subprocess.CalledProcessError as e:
-        error_message = e.stderr.decode()
+        error_message = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
         flash(f'Failed to trim video: {error_message}', 'danger')
     except FileNotFoundError:
         flash('Error: ffmpeg is not installed or not in your PATH.', 'danger')
@@ -367,7 +895,7 @@ def add_tts_to_video():
             '-i', video_path,
             '-hide_banner'
         ]
-        check_result = subprocess.run(check_audio_cmd, capture_output=True, text=True)
+        check_result = subprocess.run(check_audio_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         # ffmpeg는 정보를 stderr로 출력하므로 stderr 확인
         # stderr가 None일 수 있으므로 안전하게 처리
         stderr_output = check_result.stderr or ''
@@ -419,18 +947,18 @@ def add_tts_to_video():
                     output_path
                 ]
         
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         flash(f'TTS 음성이 적용되었습니다: {output_filename}', 'success')
         
     except subprocess.CalledProcessError as e:
-        error_message = e.stderr.decode() if e.stderr else str(e)
+        error_message = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
         print(f"ffmpeg 오류: {error_message}")
         flash(f'TTS 적용 실패: {error_message[:200]}', 'danger')
     except FileNotFoundError:
         flash('오류: ffmpeg가 설치되어 있지 않거나 PATH에 없습니다.', 'danger')
     except Exception as e:
         flash(f'TTS 적용 중 오류 발생: {str(e)}', 'danger')
-    
+
     return redirect(url_for('index'))
 
 @app.route('/extract_frame', methods=['POST'])
@@ -460,10 +988,10 @@ def extract_frame():
     ]
     
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         flash(f'프레임 추출 완료: {output_filename}', 'success')
     except subprocess.CalledProcessError as e:
-        error_message = e.stderr.decode() if e.stderr else str(e)
+        error_message = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
         flash(f'프레임 추출 실패: {error_message[:200]}', 'danger')
     except FileNotFoundError:
         flash('Error: ffmpeg is not installed or not in your PATH.', 'danger')
@@ -474,434 +1002,6 @@ def extract_frame():
 def download_file(filename):
     return send_from_directory(app.config['DOWNLOAD_FOLDER'], filename, as_attachment=True)
 
-# 설문조사 자동화 관련 임포트
-try:
-    from survey_automation import SurveyAutoFill, SurveyAnalyzer
-    SURVEY_AUTOMATION_AVAILABLE = True
-except ImportError:
-    SURVEY_AUTOMATION_AVAILABLE = False
-
-@app.route('/survey/analyze', methods=['POST'])
-def analyze_survey():
-    """설문조사 웹페이지를 분석합니다"""
-    if not SURVEY_AUTOMATION_AVAILABLE:
-        return jsonify({'error': '설문조사 자동화 모듈을 사용할 수 없습니다. 필요한 라이브러리를 설치하세요.'}), 500
-    
-    url = request.json.get('url') if request.is_json else request.form.get('url')
-    if not url:
-        return jsonify({'error': 'URL이 필요합니다.'}), 400
-    
-    try:
-        analyzer = SurveyAnalyzer(url)
-        questions = analyzer.analyze()
-        
-        if not questions:
-            return jsonify({'error': '설문조사를 찾을 수 없습니다. 페이지 구조를 확인하세요.'}), 404
-        
-        return jsonify({
-            'success': True,
-            'url': url,
-            'questions': questions,
-            'total_questions': len(questions)
-        })
-    except Exception as e:
-        import traceback
-        return jsonify({'error': f'분석 중 오류 발생: {str(e)}\n{traceback.format_exc()}'}), 500
-
-@app.route('/survey/fill', methods=['POST'])
-def fill_survey():
-    """설문조사를 자동으로 작성합니다"""
-    if not SURVEY_AUTOMATION_AVAILABLE:
-        return jsonify({'error': '설문조사 자동화 모듈을 사용할 수 없습니다.'}), 500
-    
-    data = request.json if request.is_json else request.form.to_dict()
-    url = data.get('url')
-    
-    if not url:
-        return jsonify({'error': 'URL이 필요합니다.'}), 400
-    
-    # boolean 값을 안전하게 처리
-    def to_bool(value, default=False):
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() == 'true'
-        return default
-    
-    headless = to_bool(data.get('headless'), True)
-    paginated = to_bool(data.get('paginated'), False)
-    use_api = to_bool(data.get('use_api'), False)
-    api_provider = data.get('api_provider') if use_api else None
-    api_key = data.get('api_key') if use_api else None
-    
-    automation = None
-    try:
-        automation = SurveyAutoFill(url=url, headless=headless, api_provider=api_provider, api_key=api_key)
-        
-        success = automation.fill_survey(paginated=paginated)
-        
-        if not success:
-            if automation and automation.driver:
-                automation.driver.quit()
-            return jsonify({'error': '설문조사 작성 중 오류가 발생했습니다. 서버 콘솔을 확인하세요.'}), 500
-        
-        return jsonify({
-            'success': True,
-            'url': url,
-            'mode': 'paginated' if paginated else 'single_page'
-        })
-    except Exception as e:
-        # automation 정리
-        if automation and automation.driver:
-            try:
-                automation.driver.quit()
-            except:
-                pass
-        
-        # 에러 메시지 안전하게 처리
-        error_msg = str(e).replace('"', "'").replace('\n', ' ').replace('\r', ' ')[:500]
-        return jsonify({
-            'error': f'오류 발생: {error_msg}',
-            'type': type(e).__name__
-        }), 500
-
-def handle_file_operations(user_message: str) -> tuple[str, bool]:
-    """파일 작업 처리 (읽기, 쓰기, 생성 등)"""
-    user_lower = user_message.lower()
-    
-    # 파일 읽기 요청
-    if any(keyword in user_lower for keyword in ['파일 읽', '파일 보', '파일 내용', 'read file', 'show file', 'file content']):
-        # 파일명 추출 시도
-        import re
-        file_patterns = [
-            r'["\']([^"\']+\.[a-zA-Z]+)["\']',
-            r'([a-zA-Z0-9_\-]+\.(py|txt|js|html|css|json|md|yml|yaml))',
-        ]
-        for pattern in file_patterns:
-            match = re.search(pattern, user_message)
-            if match:
-                filename = match.group(1)
-                try:
-                    if os.path.exists(filename):
-                        with open(filename, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        return f"파일 '{filename}' 내용:\n\n```\n{content[:1000]}{'...' if len(content) > 1000 else ''}\n```", True
-                    else:
-                        return f"파일 '{filename}'을 찾을 수 없습니다.", True
-                except Exception as e:
-                    return f"파일 읽기 오류: {str(e)}", True
-    
-    # 파일 생성/쓰기 요청
-    if any(keyword in user_lower for keyword in ['파일 만들', '파일 생성', '파일 쓰', 'create file', 'write file', 'make file']):
-        return "파일 생성/수정 기능을 사용하려면 파일명과 내용을 명확히 알려주세요.\n예: 'test.py 파일을 만들고 print(\"hello\") 코드를 작성해줘'", True
-    
-    return "", False
-
-def search_knowledge_base(query: str) -> list:
-    """지식 베이스에서 관련 정보 검색"""
-    global knowledge_base
-    results = []
-    query_lower = query.lower()
-    
-    for qa in knowledge_base.get('qa_pairs', []):
-        question = qa.get('question', '').lower()
-        if any(word in question for word in query_lower.split()):
-            results.append(qa)
-    
-    return results[:3]  # 상위 3개만 반환
-
-def get_chatbot_response(user_message: str, conversation_history: list = None) -> str:
-    """로컬 Transformer 모델을 사용한 챗봇 응답 생성"""
-    global knowledge_base, learning_data
-    
-    if conversation_history is None:
-        conversation_history = []
-    
-    # 파일 작업 처리 시도
-    file_response, handled = handle_file_operations(user_message)
-    if handled:
-        return file_response
-    
-    # 지식 베이스 검색
-    kb_results = search_knowledge_base(user_message)
-    kb_context = ""
-    if kb_results:
-        kb_context = "\n\n학습된 지식:\n"
-        for qa in kb_results:
-            kb_context += f"Q: {qa.get('question')}\nA: {qa.get('answer')}\n\n"
-    
-    # Few-shot 예제 추가
-    examples = ""
-    if knowledge_base.get('examples'):
-        examples = "\n\n예제 대화:\n"
-        for ex in knowledge_base.get('examples', [])[:2]:
-            examples += f"사용자: {ex.get('user')}\n조수: {ex.get('assistant')}\n\n"
-    
-    # 시스템 프롬프트: 편집 작업을 도와주는 조수 역할
-    system_prompt = f"""당신은 편집 작업을 도와주는 친절한 한국어 조수입니다. 
-다음 기능들을 제공할 수 있습니다:
-1. 코드 작성 및 수정: Python, JavaScript, HTML, CSS 등 다양한 언어의 코드 작성
-2. 파일 편집: 파일 읽기, 생성, 수정, 삭제
-3. 문제 해결: 에러 분석, 버그 수정, 코드 최적화
-4. 코드 리뷰: 코드 품질 개선, 스타일 가이드 준수
-5. 문서화: 주석 추가, README 작성
-
-사용자가 구체적인 요청을 하면 실용적이고 실행 가능한 코드나 해결책을 제공하세요.
-항상 한국어로 친절하고 명확하게 답변하세요.{kb_context}{examples}"""
-    
-    try:
-        # 로컬 Transformer 모델 로딩
-        tokenizer, model = load_chatbot_model()
-        
-        if tokenizer is None or model is None:
-            return "죄송합니다. 챗봇 모델을 로드할 수 없습니다. 모델 다운로드 중 오류가 발생했을 수 있습니다."
-        
-        prompt_parts = [f"편집 조수: {system_prompt}\n"]
-        for msg in conversation_history[-3:]:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            if role == 'user':
-                prompt_parts.append(f"사용자: {content}\n")
-            elif role == 'assistant':
-                prompt_parts.append(f"조수: {content}\n")
-        prompt_parts.append(f"사용자: {user_message}\n조수:")
-        full_prompt = "".join(prompt_parts)
-        
-        # 토큰화
-        inputs = tokenizer(
-            full_prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=True
-        )
-        
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if not next(model.parameters()).is_cuda if device == "cuda" else not next(model.parameters()).is_cpu:
-            model = model.to(device)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        # 생성
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                repetition_penalty=1.2
-            )
-        
-        # 디코딩
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        if "조수:" in generated_text:
-            response = generated_text.split("조수:")[-1].strip()
-            if "\n사용자:" in response:
-                response = response.split("\n사용자:")[0].strip()
-            if "\n" in response:
-                response = response.split("\n")[0].strip()
-        else:
-            response = generated_text[len(full_prompt):].strip()
-            if "\n" in response:
-                response = response.split("\n")[0].strip()
-        
-        if not response or len(response) < 3:
-            response = "죄송합니다. 적절한 응답을 생성하지 못했습니다. 다시 질문해주세요."
-        if len(response) > 500:
-            response = response[:500] + "..."
-        
-        # 학습 데이터에 대화 저장
-        learning_data['conversations'].append({
-            'user': user_message,
-            'assistant': response,
-            'timestamp': datetime.now().isoformat()
-        })
-        if len(learning_data['conversations']) > 1000:
-            learning_data['conversations'] = learning_data['conversations'][-1000:]
-        save_learning_data(learning_data)
-        
-        return response
-        
-    except Exception as e:
-        error_msg = str(e)
-        print(f"챗봇 응답 생성 오류: {error_msg}")
-        user_lower = user_message.lower()
-        
-        if any(word in user_lower for word in ['안녕', 'hello', 'hi', '하이']):
-            return "안녕하세요! 편집 작업을 도와드리는 조수입니다. 무엇을 도와드릴까요?"
-        elif any(word in user_lower for word in ['파일', 'file', '코드', 'code']):
-            return "파일이나 코드 작업을 도와드릴 수 있습니다. 구체적으로 어떤 작업이 필요하신가요?"
-        elif any(word in user_lower for word in ['도움', 'help', '도와']):
-            return "다음과 같은 작업을 도와드릴 수 있습니다:\n- 코드 작성 및 수정\n- 파일 편집\n- 문제 해결\n- 문법 및 스타일 개선\n\n구체적으로 무엇을 도와드릴까요?"
-        elif any(word in user_lower for word in ['감사', '고마', 'thanks', 'thank']):
-            return "천만에요! 다른 도움이 필요하시면 언제든지 말씀해주세요."
-        else:
-            return f"죄송합니다. 모델 처리 중 오류가 발생했습니다: {error_msg[:100]}. 다시 시도해주세요."
-
-@app.route('/chatbot', methods=['POST'])
-def chatbot():
-    """챗봇 API 엔드포인트"""
-    try:
-        data = request.json if request.is_json else request.form.to_dict()
-        user_message = data.get('message', '').strip()
-        conversation_history = data.get('history', [])
-        
-        if not user_message:
-            return jsonify({'error': '메시지를 입력해주세요.'}), 400
-        
-        response = get_chatbot_response(user_message, conversation_history)
-        
-        return jsonify({
-            'success': True,
-            'response': response
-        })
-    except Exception as e:
-        return jsonify({
-            'error': f'오류 발생: {str(e)}'
-        }), 500
-
-@app.route('/chatbot/file/read', methods=['POST'])
-def chatbot_read_file():
-    """파일 읽기 API"""
-    try:
-        data = request.json if request.is_json else request.form.to_dict()
-        filename = data.get('filename', '').strip()
-        
-        if not filename:
-            return jsonify({'error': '파일명을 입력해주세요.'}), 400
-        
-        if not os.path.exists(filename):
-            return jsonify({'error': f'파일을 찾을 수 없습니다: {filename}'}), 404
-        
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                content = f.read()
-            return jsonify({
-                'success': True,
-                'filename': filename,
-                'content': content,
-                'size': len(content)
-            })
-        except Exception as e:
-            return jsonify({'error': f'파일 읽기 오류: {str(e)}'}), 500
-            
-    except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
-
-@app.route('/chatbot/file/write', methods=['POST'])
-def chatbot_write_file():
-    """파일 쓰기/생성 API"""
-    try:
-        data = request.json if request.is_json else request.form.to_dict()
-        filename = data.get('filename', '').strip()
-        content = data.get('content', '')
-        mode = data.get('mode', 'w')  # 'w' (쓰기) 또는 'a' (추가)
-        
-        if not filename:
-            return jsonify({'error': '파일명을 입력해주세요.'}), 400
-        
-        # 보안: 상위 디렉토리 접근 방지
-        if '..' in filename or filename.startswith('/'):
-            return jsonify({'error': '잘못된 파일 경로입니다.'}), 400
-        
-        try:
-            with open(filename, mode, encoding='utf-8') as f:
-                f.write(content)
-            return jsonify({
-                'success': True,
-                'filename': filename,
-                'message': f'파일이 {"생성" if mode == "w" else "수정"}되었습니다.',
-                'size': len(content)
-            })
-        except Exception as e:
-            return jsonify({'error': f'파일 쓰기 오류: {str(e)}'}), 500
-            
-    except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
-
-@app.route('/chatbot/file/list', methods=['GET', 'POST'])
-def chatbot_list_files():
-    """현재 디렉토리 파일 목록 조회"""
-    try:
-        current_dir = request.args.get('dir', '.') or request.json.get('dir', '.') if request.is_json else '.'
-        
-        if not os.path.exists(current_dir):
-            return jsonify({'error': '디렉토리를 찾을 수 없습니다.'}), 404
-        
-        files = []
-        for item in os.listdir(current_dir):
-            item_path = os.path.join(current_dir, item)
-            files.append({
-                'name': item,
-                'type': 'directory' if os.path.isdir(item_path) else 'file',
-                'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0
-            })
-        
-        return jsonify({
-            'success': True,
-            'directory': current_dir,
-            'files': sorted(files, key=lambda x: (x['type'] == 'file', x['name']))
-        })
-    except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
-
-@app.route('/chatbot/learn/qa', methods=['POST'])
-def chatbot_learn_qa():
-    """Q&A 쌍을 지식 베이스에 추가"""
-    global knowledge_base
-    try:
-        data = request.json if request.is_json else request.form.to_dict()
-        question = data.get('question', '').strip()
-        answer = data.get('answer', '').strip()
-        
-        if not question or not answer:
-            return jsonify({'error': '질문과 답변을 모두 입력해주세요.'}), 400
-        
-        knowledge_base['qa_pairs'].append({
-            'question': question,
-            'answer': answer,
-            'timestamp': datetime.now().isoformat()
-        })
-        save_knowledge_base(knowledge_base)
-        
-        return jsonify({
-            'success': True,
-            'message': 'Q&A 쌍이 학습되었습니다.',
-            'total_qa': len(knowledge_base['qa_pairs'])
-        })
-    except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
-
-@app.route('/chatbot/learn/example', methods=['POST'])
-def chatbot_learn_example():
-    """예제 대화를 지식 베이스에 추가"""
-    global knowledge_base
-    try:
-        data = request.json if request.is_json else request.form.to_dict()
-        user_msg = data.get('user', '').strip()
-        assistant_msg = data.get('assistant', '').strip()
-        
-        if not user_msg or not assistant_msg:
-            return jsonify({'error': '사용자 메시지와 조수 응답을 모두 입력해주세요.'}), 400
-        
-        knowledge_base['examples'].append({
-            'user': user_msg,
-            'assistant': assistant_msg,
-            'timestamp': datetime.now().isoformat()
-        })
-        save_knowledge_base(knowledge_base)
-        
-        return jsonify({
-            'success': True,
-            'message': '예제 대화가 학습되었습니다.',
-            'total_examples': len(knowledge_base['examples'])
-        })
-    except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
-
 @app.route('/tts', methods=['POST'])
 def text_to_speech():
     """텍스트를 음성으로 변환 (한국어/영어 자동 감지)"""
@@ -911,8 +1011,8 @@ def text_to_speech():
         
         if not text:
             flash('텍스트를 입력해주세요.', 'danger')
-            return redirect(url_for('index'))
-        
+        return redirect(url_for('index'))
+    
         # 언어 자동 감지
         if language == 'auto':
             detected_lang = detect_language(text)
@@ -942,7 +1042,7 @@ def text_to_speech():
         
         # 영어 TTS (Bark만 사용)
         if detected_lang == 'en':
-            processor, model, vocoder = load_tts_model()
+            processor, model = load_tts_model()
             
             if processor is None or model is None:
                 flash('Bark TTS 모델을 로드할 수 없습니다. 모델이 설치되어 있는지 확인해주세요.', 'danger')
@@ -1042,7 +1142,7 @@ def text_to_speech():
                 traceback.print_exc()
                 flash(f'TTS 생성 실패: {error_msg[:200]}', 'danger')
                 return redirect(url_for('index'))
-        
+
     except Exception as e:
         error_msg = str(e)
         print(f"TTS 생성 오류: {error_msg}")
@@ -1051,91 +1151,97 @@ def text_to_speech():
         flash(f'TTS 생성 실패: {error_msg[:200]}', 'danger')
         return redirect(url_for('index'))
 
-@app.route('/chatbot/learn/feedback', methods=['POST'])
-def chatbot_learn_feedback():
-    """사용자 피드백 저장 및 학습"""
-    global learning_data
+@app.route('/analyze_video', methods=['POST'])
+def analyze_video():
+    """동영상 내용 분석 및 요약 - 항상 JSON 반환"""
+    filename = request.form.get('filename')
+    
+    if not filename:
+        return jsonify({'success': False, 'error': '동영상 파일을 선택해주세요.'}), 400
+    
+    video_path = os.path.join(app.config['DOWNLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(video_path):
+        return jsonify({'success': False, 'error': '동영상 파일을 찾을 수 없습니다.'}), 404
+    
     try:
-        data = request.json if request.is_json else request.form.to_dict()
-        user_message = data.get('user_message', '').strip()
-        assistant_response = data.get('assistant_response', '').strip()
-        feedback = data.get('feedback', '').strip()  # 'good', 'bad', 'improve'
-        improvement = data.get('improvement', '').strip()  # 개선 제안
+        # 동영상 분석
+        results = analyze_video_content(video_path)
         
-        learning_data['feedback'].append({
-            'user_message': user_message,
-            'assistant_response': assistant_response,
-            'feedback': feedback,
-            'improvement': improvement,
-            'timestamp': datetime.now().isoformat()
-        })
+        if results['error']:
+            return jsonify({
+                'success': False,
+                'error': f'분석 중 오류 발생: {results["error"]}'
+            }), 500
         
-        # 피드백이 'bad'이고 개선 제안이 있으면 지식 베이스에 추가
-        if feedback == 'bad' and improvement:
-            knowledge_base['qa_pairs'].append({
-                'question': user_message,
-                'answer': improvement,
-                'timestamp': datetime.now().isoformat(),
-                'source': 'feedback'
-            })
-            save_knowledge_base(knowledge_base)
+        # 결과를 JSON 파일로 저장 (downloads/analysis 폴더에 저장)
+        analysis_folder = os.path.join(app.config['DOWNLOAD_FOLDER'], 'analysis')
+        os.makedirs(analysis_folder, exist_ok=True)  # 폴더가 없으면 생성
         
-        save_learning_data(learning_data)
+        result_filename = f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        result_path = os.path.join(analysis_folder, result_filename)
         
-        return jsonify({
-            'success': True,
-            'message': '피드백이 저장되었습니다.'
-        })
-    except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
-
-@app.route('/chatbot/learn/stats', methods=['GET'])
-def chatbot_learn_stats():
-    """학습 통계 조회"""
-    global knowledge_base, learning_data
-    return jsonify({
-        'success': True,
-        'knowledge_base': {
-            'qa_pairs': len(knowledge_base.get('qa_pairs', [])),
-            'examples': len(knowledge_base.get('examples', []))
-        },
-        'learning_data': {
-            'conversations': len(learning_data.get('conversations', [])),
-            'feedback': len(learning_data.get('feedback', []))
+        # 프레임 경로를 상대 경로로 변환
+        result_data = {
+            'video_filename': filename,
+            'duration': results['duration'],
+            'transcription': results['transcription'],
+            'transcription_summary': results.get('transcription_summary', ''),
+            'summary': results['summary'],
+            'key_frames': [os.path.basename(f) for f in results['key_frames']],
+            'frame_descriptions': results.get('frame_descriptions', []),
+            'analyzed_at': datetime.now().isoformat()
         }
-    })
-
-@app.route('/chatbot/learn/export', methods=['GET'])
-def chatbot_learn_export():
-    """학습 데이터 내보내기"""
-    global knowledge_base, learning_data
-    return jsonify({
-        'success': True,
-        'knowledge_base': knowledge_base,
-        'learning_data': learning_data
-    })
-
-@app.route('/chatbot/learn/import', methods=['POST'])
-def chatbot_learn_import():
-    """학습 데이터 가져오기"""
-    global knowledge_base, learning_data
-    try:
-        data = request.json if request.is_json else request.form.to_dict()
         
-        if 'knowledge_base' in data:
-            knowledge_base.update(data['knowledge_base'])
-            save_knowledge_base(knowledge_base)
+        with open(result_path, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, ensure_ascii=False, indent=2)
         
-        if 'learning_data' in data:
-            learning_data.update(data['learning_data'])
-            save_learning_data(learning_data)
+        # 임시 프레임 파일들을 analysis 폴더로 이동
+        temp_dir = os.path.join(app.config['DOWNLOAD_FOLDER'], 'temp_frames')
+        if os.path.exists(temp_dir):
+            for frame_file in results['key_frames']:
+                if os.path.exists(frame_file):
+                    frame_name = os.path.basename(frame_file)
+                    new_frame_path = os.path.join(analysis_folder, frame_name)
+                    try:
+                        import shutil
+                        shutil.move(frame_file, new_frame_path)
+                    except:
+                        pass
         
+        # 항상 JSON 반환
         return jsonify({
             'success': True,
-            'message': '학습 데이터가 가져와졌습니다.'
+            'result': result_data,
+            'result_file': result_filename
         })
+        
     except Exception as e:
-        return jsonify({'error': f'오류 발생: {str(e)}'}), 500
+        error_msg = str(e)
+        print(f"동영상 분석 오류: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        
+        return jsonify({
+            'success': False,
+            'error': f'동영상 분석 실패: {error_msg[:200]}'
+        }), 500
+
+@app.route('/video_analysis/<path:filename>')
+def get_video_analysis(filename):
+    """저장된 분석 결과 조회"""
+    result_path = os.path.join(app.config['DOWNLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(result_path):
+        return jsonify({'error': '분석 결과를 찾을 수 없습니다.'}), 404
+    
+    try:
+        with open(result_path, 'r', encoding='utf-8') as f:
+            result_data = json.load(f)
+        return jsonify(result_data)
+    except Exception as e:
+        return jsonify({'error': f'결과 읽기 오류: {str(e)}'}), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True) 
