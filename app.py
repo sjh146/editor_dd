@@ -33,21 +33,15 @@ def check_ffmpeg_available():
 tts_processor = None
 tts_model = None
 tts_model_type = None  # 'bark'
-korean_tts_available = False
 
 # 동영상 분석 모델 로딩 (최초 1회만)
 whisper_model = None
 whisper_processor = None
 blip_processor = None
 blip_model = None
-summarizer_pipeline = None
 
-# 한국어 TTS 라이브러리 확인
-try:
-    import gtts
-    korean_tts_available = True
-except ImportError:
-    korean_tts_available = False
+# Gemini API 설정
+GEMINI_API_KEY = "AIzaSyA73IrEjd4T3fkjdDo7CTbJibWclowEmNI"
 
 def load_tts_model():
     """TTS 모델 로딩 (영어용 - Bark만 사용)"""
@@ -391,162 +385,8 @@ def analyze_frame_with_blip(image_path):
         print(f"프레임 분석 오류 ({image_path}): {e}")
         return None
 
-def load_summarizer_model():
-    """텍스트 요약 모델 로딩 (음성 인식 텍스트 요약용)"""
-    global summarizer_pipeline
-    
-    if summarizer_pipeline is not None:
-        return summarizer_pipeline
-    
-    try:
-        print("텍스트 요약 모델 로딩 중...")
-        from transformers import pipeline
-        
-        # 한국어 요약 모델 사용
-        model_name = "gogamza/kobart-base-v2"  # KoBART 기반 한국어 요약 모델
-        
-        summarizer_pipeline = pipeline(
-            "summarization",
-            model=model_name,
-            tokenizer=model_name,
-            device=0 if torch.cuda.is_available() else -1
-        )
-        
-        print(f"요약 모델 로딩 완료 ({'GPU' if torch.cuda.is_available() else 'CPU'} 모드)")
-    except Exception as e:
-        print(f"요약 모델 로딩 실패: {e}")
-        print("간단한 텍스트 요약 방법을 사용합니다.")
-        import traceback
-        traceback.print_exc()
-        summarizer_pipeline = None
-    
-    return summarizer_pipeline
-
-def summarize_transcription(transcription, summary_ratio=0.25):
-    """음성 인식 텍스트를 AI 모델로 요약 (원본의 25% 수준으로 압축)"""
-    if not transcription or len(transcription.strip()) < 50:
-        return transcription
-    
-    text = transcription.strip()
-    original_length = len(text)
-    
-    # 목표 요약 길이 계산 (원본의 25% 정도)
-    target_length = max(50, int(original_length * summary_ratio))
-    max_length = min(target_length + 30, 150)  # 최대 150자
-    min_length = max(30, int(target_length * 0.6))  # 최소 30자 또는 목표의 60%
-    
-    print(f"요약 목표: 원본 {original_length}자 -> {target_length}자 (약 {summary_ratio*100:.0f}%)")
-    
-    try:
-        # 요약 모델 로드
-        summarizer = load_summarizer_model()
-        
-        if summarizer is None:
-            # 모델이 없으면 개선된 간단한 방법 사용
-            sentences = re.split(r'[.!?]\s+', text)
-            target_sentences = max(3, int(len(sentences) * summary_ratio))
-            return generate_improved_summary(text, target_sentences=target_sentences)
-        
-        # 텍스트가 너무 길면 분할하여 요약
-        if len(text) > 1000:
-            # 긴 텍스트를 문장 단위로 분할
-            sentences = re.split(r'[.!?]\s+', text)
-            chunks = []
-            current_chunk = ""
-            
-            for sentence in sentences:
-                if len(current_chunk) + len(sentence) < 1000:
-                    current_chunk += sentence + ". "
-                else:
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                    current_chunk = sentence + ". "
-            
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            
-            # 각 청크를 요약하고 결합
-            summarized_chunks = []
-            chunk_target_length = max(30, int(target_length / len(chunks)))
-            
-            for i, chunk in enumerate(chunks):
-                try:
-                    chunk_max = min(chunk_target_length + 20, 100)
-                    chunk_min = max(20, int(chunk_target_length * 0.6))
-                    
-                    chunk_summary = summarizer(
-                        chunk,
-                        max_length=chunk_max,
-                        min_length=chunk_min,
-                        do_sample=False,
-                        repetition_penalty=2.0,  # 반복 억제 강화
-                        num_beams=5,
-                        length_penalty=0.6  # 더 짧게 만들기
-                    )
-                    if chunk_summary and len(chunk_summary) > 0:
-                        summary_text = chunk_summary[0]['summary_text']
-                        # 반복 체크 및 길이 확인 (원본의 70% 이하로)
-                        if not has_repetition(summary_text) and len(summary_text) < len(chunk) * 0.7:
-                            summarized_chunks.append(summary_text)
-                            print(f"청크 {i+1}/{len(chunks)}: {len(chunk)}자 -> {len(summary_text)}자")
-                        else:
-                            print(f"청크 {i+1} 반복 감지 또는 요약 부족, 개선된 요약 사용")
-                            improved = generate_improved_summary(chunk, target_sentences=3)
-                            summarized_chunks.append(improved)
-                except Exception as e:
-                    print(f"청크 {i+1} 요약 오류: {e}")
-                    summarized_chunks.append(generate_improved_summary(chunk, target_sentences=3))
-            
-            final_summary = " ".join(summarized_chunks)
-            # 최종 결과도 반복 체크 및 길이 확인
-            if has_repetition(final_summary) or len(final_summary) > original_length * 0.6:
-                print(f"최종 요약이 너무 김 ({len(final_summary)}자), 개선된 요약 사용")
-                target_sentences = max(3, int(len(sentences) * summary_ratio))
-                return generate_improved_summary(text, target_sentences=target_sentences)
-            
-            print(f"요약 완료: {original_length}자 -> {len(final_summary)}자 ({len(final_summary)/original_length*100:.1f}%)")
-            return final_summary
-        else:
-            # 짧은 텍스트는 바로 요약
-            try:
-                summary = summarizer(
-                    text,
-                    max_length=max_length,
-                    min_length=min_length,
-                    do_sample=False,
-                    repetition_penalty=2.0,  # 반복 억제 강화
-                    num_beams=5,
-                    length_penalty=0.6  # 더 짧게 만들기
-                )
-                if summary and len(summary) > 0:
-                    summary_text = summary[0]['summary_text']
-                    # 반복 체크 및 길이 확인
-                    if has_repetition(summary_text) or len(summary_text) > original_length * 0.6:
-                        print("반복 감지 또는 요약 부족, 개선된 요약 사용")
-                        sentences = re.split(r'[.!?]\s+', text)
-                        target_sentences = max(3, int(len(sentences) * summary_ratio))
-                        return generate_improved_summary(text, target_sentences=target_sentences)
-                    
-                    print(f"요약 완료: {original_length}자 -> {len(summary_text)}자 ({len(summary_text)/original_length*100:.1f}%)")
-                    return summary_text
-                else:
-                    sentences = re.split(r'[.!?]\s+', text)
-                    target_sentences = max(3, int(len(sentences) * summary_ratio))
-                    return generate_improved_summary(text, target_sentences=target_sentences)
-            except Exception as e:
-                print(f"요약 오류: {e}")
-                sentences = re.split(r'[.!?]\s+', text)
-                target_sentences = max(3, int(len(sentences) * summary_ratio))
-                return generate_improved_summary(text, target_sentences=target_sentences)
-    
-    except Exception as e:
-        print(f"텍스트 요약 실패: {e}")
-        sentences = re.split(r'[.!?]\s+', text)
-        target_sentences = max(3, int(len(sentences) * summary_ratio))
-        return generate_improved_summary(text, target_sentences=target_sentences)
-
 def has_repetition(text, threshold=3):
-    """텍스트에 반복이 있는지 확인"""
+    """텍스트에 반복이 있는지 확인 (프레임 분석용)"""
     if not text:
         return False
     
@@ -568,62 +408,126 @@ def has_repetition(text, threshold=3):
     
     return False
 
-def generate_improved_summary(text, target_sentences=5):
-    """개선된 간단한 텍스트 요약 (핵심 문장 선택)"""
-    if not text or len(text.strip()) < 50:
-        return text
+def summarize_transcription(transcription, summary_ratio=0.25):
+    """음성 인식 텍스트를 Gemini API로 요약"""
+    if not transcription or len(transcription.strip()) < 50:
+        return transcription
     
-    # 문장 분리
-    sentences = re.split(r'[.!?]\s+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
+    text = transcription.strip()
+    original_length = len(text)
     
-    if len(sentences) <= target_sentences:
-        return text
+    print(f"Gemini API로 요약 시작: 원본 {original_length}자")
     
-    # 문장 중요도 계산 (길이, 위치, 키워드 포함)
-    scored_sentences = []
-    total_sentences = len(sentences)
-    
-    for idx, sentence in enumerate(sentences):
-        score = 0
+    try:
+        import google.generativeai as genai
         
-        # 위치 점수 (시작과 끝이 중요)
-        if idx < total_sentences * 0.2:  # 처음 20%
-            score += 2
-        elif idx > total_sentences * 0.8:  # 마지막 20%
-            score += 2
-        elif idx < total_sentences * 0.3:  # 처음 30%
-            score += 1
+        # Gemini API 설정
+        genai.configure(api_key=GEMINI_API_KEY)
         
-        # 길이 점수 (적당히 긴 문장이 중요)
-        if 20 <= len(sentence) <= 100:
-            score += 1
-        elif len(sentence) > 100:
-            score += 0.5
+        # 먼저 사용 가능한 모델 목록 확인
+        available_models = []
+        try:
+            print("사용 가능한 Gemini 모델 목록 확인 중...")
+            models_list = genai.list_models()
+            for m in models_list:
+                if hasattr(m, 'supported_generation_methods') and 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+                    print(f"  ✓ {m.name}")
+            if not available_models:
+                print("  (사용 가능한 모델을 찾을 수 없음)")
+        except Exception as e:
+            print(f"모델 목록 조회 실패: {e}")
+            import traceback
+            traceback.print_exc()
         
-        # 키워드 점수 (중요한 단어 포함)
-        important_words = ['중요', '핵심', '결론', '요약', '정리', '결과', '발견', '연구', '분석']
-        if any(word in sentence for word in important_words):
-            score += 2
+        # 사용 가능한 모델이 있으면 첫 번째 사용, 없으면 기본 모델명 시도
+        model = None
+        if available_models:
+            # 사용 가능한 모델 중 첫 번째 사용
+            model_name = available_models[0]
+            print(f"사용 가능한 모델 발견: {model_name}")
+            try:
+                model = genai.GenerativeModel(model_name)
+                print(f"✅ 모델 로드 성공: {model_name}")
+            except Exception as e:
+                print(f"모델 {model_name} 로드 실패: {e}")
+                model = None
         
-        scored_sentences.append((score, idx, sentence))
-    
-    # 점수 순으로 정렬
-    scored_sentences.sort(reverse=True)
-    
-    # 상위 문장 선택
-    selected_indices = sorted([idx for _, idx, _ in scored_sentences[:target_sentences]])
-    summary_sentences = [sentences[idx] for idx in selected_indices]
-    
-    summary = '. '.join(summary_sentences)
-    if not summary.endswith(('.', '!', '?')):
-        summary += '.'
-    
-    return summary
+        # 사용 가능한 모델이 없거나 로드 실패 시 기본 모델명들 시도
+        if model is None:
+            model_names = [
+                'models/gemini-1.5-pro-latest',
+                'models/gemini-1.5-flash-latest', 
+                'models/gemini-pro',
+                'gemini-1.5-pro',
+                'gemini-1.5-flash',
+                'gemini-pro'
+            ]
+            
+            print("기본 모델명으로 시도 중...")
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    print(f"✅ 모델 객체 생성 성공: {model_name}")
+                    # 실제 API 호출 테스트 (짧은 프롬프트로)
+                    test_response = model.generate_content("테스트")
+                    if test_response and test_response.text:
+                        print(f"✅ 모델 API 호출 성공: {model_name}")
+                        break
+                    else:
+                        print(f"⚠️ 모델 {model_name} API 응답이 비어있음")
+                        model = None
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"  ✗ {model_name}: {error_msg[:150]}")
+                    model = None
+                    continue
+        
+        if model is None:
+            raise Exception("사용 가능한 Gemini 모델을 찾을 수 없습니다. API 키와 모델 접근 권한을 확인하세요.")
+        
+        # 요약 프롬프트 생성
+        prompt = f"""다음은 동영상의 음성 인식 결과입니다. 핵심 내용을 간결하게 요약해주세요.
 
-def generate_simple_summary(text, max_sentences=3):
-    """간단한 텍스트 요약 (폴백 방법) - generate_improved_summary로 대체"""
-    return generate_improved_summary(text, target_sentences=max_sentences)
+원본 텍스트:
+{text}
+
+요약 요구사항:
+- 핵심 내용만 간결하게 요약
+- 원본의 약 {int(summary_ratio*100)}% 정도의 길이로 압축
+- 자연스러운 한국어로 작성
+- 불필요한 반복 제거
+
+요약:"""
+        
+        # Gemini API 호출
+        response = model.generate_content(prompt)
+        
+        if response and response.text:
+            summary = response.text.strip()
+            print(f"✅ Gemini API 요약 성공: {original_length}자 -> {len(summary)}자 ({len(summary)/original_length*100:.1f}%)")
+            return summary
+        else:
+            print("⚠️ Gemini API 응답이 비어있습니다.")
+            raise Exception("Gemini API 응답이 비어있습니다.")
+    
+    except ImportError:
+        print("google-generativeai 패키지가 설치되지 않았습니다. pip install google-generativeai를 실행하세요.")
+        # 폴백: 간단한 요약
+        sentences = re.split(r'[.!?]\s+', text)
+        target_sentences = max(3, int(len(sentences) * summary_ratio))
+        return ". ".join(sentences[:target_sentences]) + "."
+    
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Gemini API 요약 실패: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        # 폴백: 간단한 요약
+        sentences = re.split(r'[.!?]\s+', text)
+        target_sentences = max(3, int(len(sentences) * summary_ratio))
+        return ". ".join(sentences[:target_sentences]) + "."
+
 
 def generate_video_summary_from_frames(frame_descriptions, transcription="", transcription_summary=""):
     """프레임 분석 결과와 음성 인식을 종합하여 동영상 요약 생성"""
@@ -725,40 +629,6 @@ def analyze_video_content(video_path):
     
     return results
 
-def generate_summary(text, max_sentences=3):
-    """텍스트 요약 생성 (간단한 방법)"""
-    if not text or len(text.strip()) < 50:
-        return text
-    
-    # 문장 분리
-    sentences = re.split(r'[.!?]\s+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    
-    if len(sentences) <= max_sentences:
-        return text
-    
-    # 첫 문장과 마지막 문장, 그리고 중간의 긴 문장 선택
-    summary_sentences = []
-    if sentences:
-        summary_sentences.append(sentences[0])
-    
-    # 중간에서 가장 긴 문장 선택
-    if len(sentences) > 2:
-        middle_sentences = sentences[1:-1]
-        if middle_sentences:
-            longest = max(middle_sentences, key=len)
-            summary_sentences.append(longest)
-    
-    # 마지막 문장
-    if len(sentences) > 1:
-        summary_sentences.append(sentences[-1])
-    
-    summary = '. '.join(summary_sentences[:max_sentences])
-    if not summary.endswith(('.', '!', '?')):
-        summary += '.'
-    
-    return summary
-
 @app.route('/')
 def index():
     files = get_downloaded_files()
@@ -772,6 +642,10 @@ def download():
     if not url:
         flash('URL is required!', 'danger')
         return redirect(url_for('index'))
+
+    # 동영상 저장 폴더 설정
+    video_folder = os.path.join(app.config['DOWNLOAD_FOLDER'], 'video')
+    os.makedirs(video_folder, exist_ok=True)  # 폴더가 없으면 생성
 
     # ffmpeg 사용 가능 여부 확인
     ffmpeg_available = check_ffmpeg_available()
@@ -788,7 +662,7 @@ def download():
         
         try:
             ydl_opts = {
-                'outtmpl': os.path.join(app.config['DOWNLOAD_FOLDER'], '%(title)s.%(ext)s'),
+                'outtmpl': os.path.join(video_folder, '%(title)s.%(ext)s'),
                 'format': format_str,
                 'noplaylist': True,
             }
@@ -1024,10 +898,13 @@ def text_to_speech():
             try:
                 # gTTS 사용 (간단하고 한국어 지원 좋음)
                 from gtts import gTTS
-                import io
+                
+                # TTS 저장 폴더 설정
+                tts_folder = os.path.join(DOWNLOAD_FOLDER, 'tts')
+                os.makedirs(tts_folder, exist_ok=True)  # 폴더가 없으면 생성
                 
                 filename = f"tts_ko_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-                output_path = os.path.join(DOWNLOAD_FOLDER, filename)
+                output_path = os.path.join(tts_folder, filename)
                 
                 tts = gTTS(text=text, lang='ko', slow=False)
                 tts.save(output_path)
@@ -1128,8 +1005,12 @@ def text_to_speech():
                 speech = np.concatenate(speech_chunks)
                 speech = np.clip(speech, -1.0, 1.0)
                 
+                # TTS 저장 폴더 설정
+                tts_folder = os.path.join(DOWNLOAD_FOLDER, 'tts')
+                os.makedirs(tts_folder, exist_ok=True)  # 폴더가 없으면 생성
+                
                 filename = f"tts_en_bark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-                output_path = os.path.join(DOWNLOAD_FOLDER, filename)
+                output_path = os.path.join(tts_folder, filename)
                 sf.write(output_path, speech, sample_rate)
                 
                 flash(f'영어 TTS 생성 완료 (Bark): {filename}', 'success')
