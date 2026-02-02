@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Universal Downloader</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='index.css') }}">
+    <link rel="stylesheet" href="/static/index.css">
   </head>
   <body>
     <div class="container mt-5">
@@ -33,16 +33,7 @@
         </ul>
       </div>
 
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          {% for category, message in messages %}
-            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-              {{ message }}
-              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-            </div>
-          {% endfor %}
-        {% endif %}
-      {% endwith %}
+      <!-- Flash messages removed for Go version -->
 
       <div class="tab-content" id="mainTabsContent">
         <!-- Download Tab -->
@@ -60,14 +51,14 @@
           </div>
           <h2 class="mt-3">Downloaded Files</h2>
           <div class="list-group">
-            {% for file in files %}
-              <a href="{{ url_for('download_file', filename=file) }}" class="list-group-item list-group-item-action">
-                <strong>{{ file }}</strong>
+            {{range .files}}
+              <a href="/downloads/{{.}}" class="list-group-item list-group-item-action">
+                <strong>{{.}}</strong>
                 <span class="badge bg-secondary ms-2" style="float: right;">Download</span>
               </a>
-            {% else %}
+            {{else}}
               <div class="list-group-item text-muted">No files downloaded yet.</div>
-            {% endfor %}
+            {{end}}
           </div>
         </div>
 
@@ -86,11 +77,9 @@
               <label for="extract_filename" class="form-label">Video File</label>
               <select class="form-select" name="filename" id="extract_filename" required>
                 <option selected disabled value="">동영상 파일 선택...</option>
-                {% for file in files %}
-                  {% if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')) %}
-                    <option value="{{ file }}">{{ file }}</option>
-                  {% endif %}
-                {% endfor %}
+                {{range .video_files}}
+                  <option value="{{.}}">{{.}}</option>
+                {{end}}
               </select>
             </div>
             <div class="mb-3">
@@ -115,11 +104,9 @@
               <label for="edit_filename" class="form-label">File to Edit</label>
               <select class="form-select" name="filename" id="edit_filename" required>
                 <option selected disabled value="">Choose a file...</option>
-                {% for file in files %}
-                  {% if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')) %}
-                    <option value="{{ file }}">{{ file }}</option>
-                  {% endif %}
-                {% endfor %}
+                {{range .video_files}}
+                  <option value="{{.}}">{{.}}</option>
+                {{end}}
               </select>
             </div>
             <div class="row">
@@ -148,26 +135,24 @@
               <label for="video_filename" class="form-label">동영상 파일 선택</label>
               <select class="form-select" name="video_filename" id="video_filename" required>
                 <option selected disabled value="">동영상 파일 선택...</option>
-                {% for file in files %}
-                  {% if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')) %}
-                    <option value="{{ file }}">{{ file }}</option>
-                  {% endif %}
-                {% endfor %}
+                {{range .video_files}}
+                  <option value="{{.}}">{{.}}</option>
+                {{end}}
               </select>
             </div>
             <div class="mb-3">
               <label for="tts_filename" class="form-label">TTS 음성 파일 선택</label>
               <select class="form-select" name="tts_filename" id="tts_filename" required>
                 <option selected disabled value="">TTS 파일 선택...</option>
-                {% for file in tts_files %}
-                  <option value="{{ file }}">{{ file }}</option>
-                {% endfor %}
+                {{range .tts_files}}
+                  <option value="{{.}}">{{.}}</option>
+                {{end}}
               </select>
-              {% if not tts_files %}
+              {{if not .tts_files}}
                 <small class="form-text text-muted text-danger">TTS 파일이 없습니다. 먼저 AI TTS 탭에서 음성을 생성하세요.</small>
-              {% else %}
+              {{else}}
                 <small class="form-text text-muted">AI TTS에서 생성한 음성 파일을 선택하세요.</small>
-              {% endif %}
+              {{end}}
             </div>
             <div class="mb-3">
               <label for="audio_mode" class="form-label">오디오 처리 방식</label>
@@ -189,7 +174,7 @@
                 비워두면 "[원본파일명]_with_tts.[확장자]" 형식으로 자동 생성됩니다.
               </small>
             </div>
-            <button type="submit" class="btn btn-primary w-100" {% if not tts_files %}disabled{% endif %}>TTS 음성 적용</button>
+            <button type="submit" class="btn btn-primary w-100" {{if not .tts_files}}disabled{{end}}>TTS 음성 적용</button>
           </form>
         </div>
       </div>
@@ -206,17 +191,17 @@
               <label for="analyze_filename" class="form-label">분석할 동영상 파일 선택</label>
               <select class="form-select" name="filename" id="analyze_filename" required>
                 <option selected disabled value="">동영상 파일 선택...</option>
-                {% for file in video_files %}
-                  <option value="{{ file }}">{{ file }}</option>
-                {% endfor %}
+                {{range .video_files}}
+                  <option value="{{.}}">{{.}}</option>
+                {{end}}
               </select>
-              {% if not video_files %}
+              {{if not .video_files}}
                 <small class="form-text text-muted text-danger">분석할 동영상 파일이 없습니다.</small>
-              {% else %}
+              {{else}}
                 <small class="form-text text-muted">분석할 동영상을 선택하세요. 음성이 있는 동영상에서 더 정확한 분석이 가능합니다.</small>
-              {% endif %}
+              {{end}}
             </div>
-            <button type="submit" class="btn btn-success w-100" {% if not video_files %}disabled{% endif %}>
+            <button type="submit" class="btn btn-success w-100" {{if not .video_files}}disabled{{end}}>
               <span id="analyze-loading" style="display: none;">
                 <span class="spinner-border spinner-border-sm me-2"></span>분석 중...
               </span>
@@ -228,6 +213,74 @@
               <h6>분석 결과</h6>
               <div id="analysis-content"></div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 임베딩 저장 -->
+      <div class="card my-4">
+        <div class="card-header">
+          <h5 class="mb-0">💾 Save to Vector Database (pgvector에 임베딩 저장)</h5>
+        </div>
+        <div class="card-body">
+          <p class="text-muted">동영상, 이미지, 오디오 파일을 pgvector 데이터베이스에 임베딩으로 저장합니다.</p>
+          <form action="/save_embedding" method="post" id="save-embedding-form">
+            <div class="mb-3">
+              <label for="embedding_file_type" class="form-label">파일 타입</label>
+              <select class="form-select" name="file_type" id="embedding_file_type" required>
+                <option value="video">동영상 (Video)</option>
+                <option value="image">이미지 (Image)</option>
+                <option value="audio">오디오 (Audio)</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label for="embedding_filename" class="form-label">파일 선택</label>
+              <select class="form-select" name="filename" id="embedding_filename" required>
+                <option selected disabled value="">파일 선택...</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">
+              <span id="save-embedding-loading" style="display: none;">
+                <span class="spinner-border spinner-border-sm me-2"></span>저장 중...
+              </span>
+              <span id="save-embedding-text">임베딩 저장</span>
+            </button>
+          </form>
+          <div id="save-embedding-result" class="mt-3" style="display: none;"></div>
+        </div>
+      </div>
+
+      <!-- 벡터 검색 -->
+      <div class="card my-4">
+        <div class="card-header">
+          <h5 class="mb-0">🔍 Vector Search (벡터 유사도 검색)</h5>
+        </div>
+        <div class="card-body">
+          <p class="text-muted">저장된 임베딩을 기반으로 유사한 콘텐츠를 검색합니다.</p>
+          <form id="search-form">
+            <div class="mb-3">
+              <label for="search_query" class="form-label">검색어</label>
+              <input type="text" class="form-control" id="search_query" placeholder="예: 한국어 커플, AI 기술, 음악" required>
+            </div>
+            <div class="mb-3">
+              <label for="search_type" class="form-label">파일 타입 필터 (선택사항)</label>
+              <select class="form-select" id="search_type">
+                <option value="">전체</option>
+                <option value="video">동영상</option>
+                <option value="image">이미지</option>
+                <option value="audio">오디오</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-info w-100">
+              <span id="search-loading" style="display: none;">
+                <span class="spinner-border spinner-border-sm me-2"></span>검색 중...
+              </span>
+              <span id="search-text">검색</span>
+            </button>
+          </form>
+          <div id="search-results" class="mt-3" style="display: none;">
+            <h6>검색 결과</h6>
+            <div id="search-results-content"></div>
           </div>
         </div>
       </div>
@@ -269,25 +322,25 @@
         
         <h2 class="mt-5">생성된 음성 파일</h2>
         <div class="list-group">
-          {% for file in tts_files %}
+          {{range .tts_files}}
             <div class="list-group-item">
               <div class="d-flex justify-content-between align-items-center">
                 <div style="flex: 1;">
-                  <strong>{{ file }}</strong>
+                  <strong>{{.}}</strong>
                   <audio controls class="mt-2" style="width: 100%;">
-                    {% if file.endswith('.mp3') %}
-                      <source src="{{ url_for('download_file', filename=file) }}" type="audio/mpeg">
-                    {% else %}
-                      <source src="{{ url_for('download_file', filename=file) }}" type="audio/wav">
-                    {% endif %}
+                    {{if hasSuffix . ".mp3"}}
+                      <source src="/downloads/{{.}}" type="audio/mpeg">
+                    {{else}}
+                      <source src="/downloads/{{.}}" type="audio/wav">
+                    {{end}}
                   </audio>
                 </div>
-                <a href="{{ url_for('download_file', filename=file) }}" class="btn btn-sm btn-primary ms-3">다운로드</a>
+                <a href="/downloads/{{.}}" class="btn btn-sm btn-primary ms-3">다운로드</a>
               </div>
             </div>
-          {% else %}
+          {{else}}
             <div class="list-group-item text-muted">생성된 음성 파일이 없습니다.</div>
-          {% endfor %}
+          {{end}}
         </div>
       </div>
     </div>
@@ -487,6 +540,135 @@
         div.textContent = text;
         return div.innerHTML;
       }
+
+      // 파일 타입에 따라 파일 목록 업데이트
+      document.getElementById('embedding_file_type')?.addEventListener('change', function() {
+        const fileType = this.value;
+        const filenameSelect = document.getElementById('embedding_filename');
+        if (!filenameSelect) return;
+        
+        filenameSelect.innerHTML = '<option selected disabled value="">파일 선택...</option>';
+        
+        // Go 템플릿에서 전달된 데이터 사용
+        const videoFiles = {{.video_files}} || [];
+        const ttsFiles = {{.tts_files}} || [];
+        const imageFiles = {{.image_files}} || [];
+        
+        let files = [];
+        if (fileType === 'video') {
+          files = videoFiles;
+        } else if (fileType === 'audio') {
+          files = ttsFiles;
+        } else if (fileType === 'image') {
+          files = imageFiles;
+        }
+        
+        files.forEach(file => {
+          const option = document.createElement('option');
+          option.value = file;
+          option.textContent = file;
+          filenameSelect.appendChild(option);
+        });
+      });
+
+      // 임베딩 저장 폼 제출
+      document.getElementById('save-embedding-form')?.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        const loadingSpan = document.getElementById('save-embedding-loading');
+        const textSpan = document.getElementById('save-embedding-text');
+        const resultDiv = document.getElementById('save-embedding-result');
+        
+        if (loadingSpan) loadingSpan.style.display = 'inline';
+        if (textSpan) textSpan.style.display = 'none';
+        if (resultDiv) resultDiv.style.display = 'none';
+        
+        try {
+          const response = await fetch('/save_embedding', {
+            method: 'POST',
+            body: formData
+          });
+          
+          const data = await response.json();
+          
+          if (data.success) {
+            resultDiv.innerHTML = '<div class="alert alert-success">임베딩이 성공적으로 저장되었습니다!</div>';
+            resultDiv.style.display = 'block';
+          } else {
+            resultDiv.innerHTML = '<div class="alert alert-danger">오류: ' + escapeHtml(data.error || '알 수 없는 오류') + '</div>';
+            resultDiv.style.display = 'block';
+          }
+        } catch (error) {
+          resultDiv.innerHTML = '<div class="alert alert-danger">오류 발생: ' + escapeHtml(error.message) + '</div>';
+          resultDiv.style.display = 'block';
+        } finally {
+          if (loadingSpan) loadingSpan.style.display = 'none';
+          if (textSpan) textSpan.style.display = 'inline';
+        }
+      });
+
+      // 검색 폼 제출
+      document.getElementById('search-form')?.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        const query = document.getElementById('search_query').value;
+        const fileType = document.getElementById('search_type').value;
+        const loadingSpan = document.getElementById('search-loading');
+        const textSpan = document.getElementById('search-text');
+        const resultsDiv = document.getElementById('search-results');
+        const contentDiv = document.getElementById('search-results-content');
+        
+        if (loadingSpan) loadingSpan.style.display = 'inline';
+        if (textSpan) textSpan.style.display = 'none';
+        if (resultsDiv) resultsDiv.style.display = 'none';
+        
+        try {
+          let url = '/search?q=' + encodeURIComponent(query);
+          if (fileType) {
+            url += '&type=' + encodeURIComponent(fileType);
+          }
+          
+          const response = await fetch(url);
+          const data = await response.json();
+          
+          if (data.success) {
+            let html = '';
+            if (data.results && data.results.length > 0) {
+              html = '<div class="list-group">';
+              data.results.forEach(result => {
+                html += '<div class="list-group-item">';
+                html += '<h6>' + escapeHtml(result.file_name) + '</h6>';
+                html += '<p class="mb-1"><strong>타입:</strong> ' + escapeHtml(result.file_type) + '</p>';
+                html += '<p class="mb-1"><strong>경로:</strong> ' + escapeHtml(result.folder_path) + '</p>';
+                if (result.transcription) {
+                  html += '<p class="mb-1"><strong>음성 인식:</strong> ' + escapeHtml(result.transcription.substring(0, 100)) + '...</p>';
+                }
+                if (result.summary) {
+                  html += '<p class="mb-1"><strong>요약:</strong> ' + escapeHtml(result.summary) + '</p>';
+                }
+                html += '<a href="/downloads/' + escapeHtml(result.folder_path) + '/' + escapeHtml(result.file_name) + '" class="btn btn-sm btn-primary mt-2">다운로드</a>';
+                html += '</div>';
+              });
+              html += '</div>';
+            } else {
+              html = '<div class="alert alert-info">검색 결과가 없습니다.</div>';
+            }
+            
+            contentDiv.innerHTML = html;
+            resultsDiv.style.display = 'block';
+          } else {
+            contentDiv.innerHTML = '<div class="alert alert-danger">오류: ' + escapeHtml(data.error || '알 수 없는 오류') + '</div>';
+            resultsDiv.style.display = 'block';
+          }
+        } catch (error) {
+          contentDiv.innerHTML = '<div class="alert alert-danger">오류 발생: ' + escapeHtml(error.message) + '</div>';
+          resultsDiv.style.display = 'block';
+        } finally {
+          if (loadingSpan) loadingSpan.style.display = 'none';
+          if (textSpan) textSpan.style.display = 'inline';
+        }
+      });
 
     </script>
   </body>
