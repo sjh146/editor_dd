@@ -65,6 +65,7 @@ func main() {
 	r.POST("/edit", h.Edit)
 	r.POST("/extract_frame", h.ExtractFrame)
 	r.POST("/add_tts_to_video", h.AddTTSToVideo)
+	r.POST("/concat_videos", h.ConcatVideos)
 	r.POST("/tts", h.TextToSpeech)
 	r.POST("/analyze_video", h.AnalyzeVideo)
 	r.GET("/downloads/*filename", h.DownloadFile)
